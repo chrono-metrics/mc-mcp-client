@@ -20,3 +20,10 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "live_service: requires a live MC-MCP service (set MC_MCP_SERVICE_URL)",
+    "requires_model: requires a real LLM model server (set MC_MCP_MODEL_URL)",
+]
+# Integration tests are excluded from the default run; opt in with:
+#   pytest tests/integration/ -v
+#   pytest -m live_service -v
