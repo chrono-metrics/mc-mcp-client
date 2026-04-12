@@ -4,7 +4,16 @@ from pathlib import Path
 
 import pytest
 
-from mc_mcp_client.config import EpisodeConfig, ModelConfig, ServiceConfig, load_config
+from mc_mcp_client.config import (
+    ClientConfig,
+    DEFAULT_SERVICE_URL,
+    EpisodeConfig,
+    ModelConfig,
+    ServiceConfig,
+    SessionConfig,
+    load_client_config,
+    load_config,
+)
 
 
 def test_service_config_derives_session_create_url() -> None:
@@ -13,12 +22,26 @@ def test_service_config_derives_session_create_url() -> None:
     assert config.session_create_url == "https://api.mc-mcp.com/v1/sessions"
 
 
-def test_load_config_returns_defaults_when_file_is_missing(tmp_path: Path) -> None:
-    episode, service, model = load_config(str(tmp_path / "missing.yaml"))
+def test_service_config_defaults_to_hosted_service() -> None:
+    config = ServiceConfig()
 
+    assert config.service_url == DEFAULT_SERVICE_URL
+    assert config.session_create_url == "https://api.mc-mcp.com/v1/sessions"
+
+
+def test_load_config_returns_defaults_when_file_is_missing(tmp_path: Path) -> None:
+    session, episode, service, model = load_config(str(tmp_path / "missing.yaml"))
+
+    assert session == SessionConfig()
     assert episode == EpisodeConfig()
     assert service == ServiceConfig()
     assert model == ModelConfig()
+
+
+def test_load_client_config_returns_grouped_defaults_when_file_is_missing(tmp_path: Path) -> None:
+    client = load_client_config(str(tmp_path / "missing.yaml"))
+
+    assert client == ClientConfig()
 
 
 def test_load_config_reads_yaml_and_expands_env_vars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,9 +56,10 @@ model:
   backend: "vllm"
   model: "qwen3-8b"
   base_url: "http://localhost:8080/v1"
+session:
+  enabled_tiers: ["E0", "E1", "E2"]
 episode:
   stage: 3
-  enabled_tiers: ["E0", "E1", "E2"]
   seeds: [11, 13]
   max_steps: 60
   synthesis_cadence: 10
@@ -46,10 +70,10 @@ episode:
         encoding="utf-8",
     )
 
-    episode, service, model = load_config(str(config_path))
+    session, episode, service, model = load_config(str(config_path))
 
+    assert session.enabled_tiers == ["E0", "E1", "E2"]
     assert episode.stage == 3
-    assert episode.enabled_tiers == ["E0", "E1", "E2"]
     assert episode.seeds == [11, 13]
     assert episode.max_steps == 60
     assert episode.synthesis_cadence == 10
@@ -83,13 +107,33 @@ episode:
     monkeypatch.setenv("MC_MCP_SERVICE_URL", "wss://env-service.mc-mcp.com")
     monkeypatch.setenv("MC_MCP_MODEL_URL", "http://env-model:9000/v1")
 
-    episode, service, model = load_config(str(config_path))
+    session, episode, service, model = load_config(str(config_path))
 
+    assert session == SessionConfig()
     assert episode.stage == 5
     assert service.api_key == "env-key"
     assert service.service_url == "wss://env-service.mc-mcp.com"
     assert service.session_create_url == "https://env-service.mc-mcp.com/v1/sessions"
     assert model.base_url == "http://env-model:9000/v1"
+
+
+def test_load_config_promotes_legacy_episode_enabled_tiers_to_session(tmp_path: Path) -> None:
+    config_path = tmp_path / "mc_mcp_config.yaml"
+    config_path.write_text(
+        """
+episode:
+  enabled_tiers: ["E0", "E1"]
+  stage: 1
+""",
+        encoding="utf-8",
+    )
+
+    session, episode, service, model = load_config(str(config_path))
+
+    assert session.enabled_tiers == ["E0", "E1"]
+    assert episode == EpisodeConfig(stage=1)
+    assert service == ServiceConfig()
+    assert model == ModelConfig()
 
 
 def test_load_config_rejects_non_mapping_top_level(tmp_path: Path) -> None:

@@ -11,6 +11,14 @@ from typing import Any
 import yaml
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+DEFAULT_SERVICE_URL = "wss://api.mc-mcp.com"
+
+
+@dataclass
+class SessionConfig:
+    """Configuration for session bootstrap with the curriculum service."""
+
+    enabled_tiers: list[str] | None = None
 
 
 @dataclass
@@ -18,7 +26,6 @@ class EpisodeConfig:
     """Configuration for a single episode run."""
 
     stage: int = 2
-    enabled_tiers: list[str] | None = None
     seeds: list[int] | None = None
     max_steps: int = 40
     synthesis_cadence: int = 8
@@ -35,9 +42,9 @@ class EpisodeConfig:
 
 @dataclass
 class ServiceConfig:
-    """Connection details for the MC-MCP service."""
+    """Connection details for the hosted or self-managed MC-MCP service."""
 
-    service_url: str = "ws://localhost:9090"
+    service_url: str = DEFAULT_SERVICE_URL
     api_key: str = ""
     session_create_url: str = ""
 
@@ -63,20 +70,32 @@ class ModelConfig:
 class ClientConfig:
     """Grouped runtime configuration for the client."""
 
+    session: SessionConfig = field(default_factory=SessionConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     service: ServiceConfig = field(default_factory=ServiceConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
 
 
-def load_config(path: str = "mc_mcp_config.yaml") -> tuple[EpisodeConfig, ServiceConfig, ModelConfig]:
-    """Load config from YAML and apply environment overrides."""
+def load_client_config(path: str = "mc_mcp_config.yaml") -> ClientConfig:
+    """Load grouped client config from YAML and apply environment overrides."""
 
     raw_config = _load_yaml_mapping(Path(path))
     expanded_config = _expand_env_vars(raw_config)
 
+    session_data = _section_kwargs(SessionConfig, expanded_config.get("session"))
     episode_data = _section_kwargs(EpisodeConfig, expanded_config.get("episode"))
     service_data = _section_kwargs(ServiceConfig, expanded_config.get("service"))
     model_data = _section_kwargs(ModelConfig, expanded_config.get("model"))
+
+    # Backward-compatible migration path for older configs that placed
+    # session bootstrap settings under the episode section.
+    episode_section = expanded_config.get("episode")
+    if (
+        "enabled_tiers" not in session_data
+        and isinstance(episode_section, dict)
+        and "enabled_tiers" in episode_section
+    ):
+        session_data["enabled_tiers"] = episode_section["enabled_tiers"]
 
     api_key = os.getenv("MC_MCP_API_KEY")
     service_url = os.getenv("MC_MCP_SERVICE_URL")
@@ -91,7 +110,21 @@ def load_config(path: str = "mc_mcp_config.yaml") -> tuple[EpisodeConfig, Servic
     if model_url is not None:
         model_data["base_url"] = model_url
 
-    return EpisodeConfig(**episode_data), ServiceConfig(**service_data), ModelConfig(**model_data)
+    return ClientConfig(
+        session=SessionConfig(**session_data),
+        episode=EpisodeConfig(**episode_data),
+        service=ServiceConfig(**service_data),
+        model=ModelConfig(**model_data),
+    )
+
+
+def load_config(
+    path: str = "mc_mcp_config.yaml",
+) -> tuple[SessionConfig, EpisodeConfig, ServiceConfig, ModelConfig]:
+    """Load config and return discrete session, episode, service, and model sections."""
+
+    client = load_client_config(path)
+    return client.session, client.episode, client.service, client.model
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
@@ -130,8 +163,11 @@ def _section_kwargs(cls: type[Any], section: Any) -> dict[str, Any]:
 
 __all__ = [
     "ClientConfig",
+    "DEFAULT_SERVICE_URL",
+    "SessionConfig",
     "EpisodeConfig",
     "ServiceConfig",
     "ModelConfig",
+    "load_client_config",
     "load_config",
 ]

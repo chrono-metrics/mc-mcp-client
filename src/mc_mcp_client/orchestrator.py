@@ -13,7 +13,12 @@ from typing import Any
 from urllib import error, request
 
 from mc_mcp_client.backends.base import LLMBackend
-from mc_mcp_client.config import EpisodeConfig, ServiceConfig
+from mc_mcp_client.config import (
+    DEFAULT_SERVICE_URL,
+    EpisodeConfig,
+    ServiceConfig,
+    SessionConfig,
+)
 from mc_mcp_client.connection import Connection
 from mc_mcp_client.protocol import (
     EpisodeComplete,
@@ -45,22 +50,34 @@ class Orchestrator:
     def __init__(
         self,
         backend: LLMBackend,
-        service_url: str = "",
+        *,
         api_key: str = "",
+        session_config: SessionConfig | dict[str, Any] | None = None,
+        service_url: str = DEFAULT_SERVICE_URL,
+        episode_config: EpisodeConfig | None = None,
         config: EpisodeConfig | None = None,
         service_config: ServiceConfig | None = None,
     ) -> None:
-        if service_config is not None:
-            self._service_config: ServiceConfig | None = service_config
-            self.connection = Connection(service_config.service_url, service_config.api_key)
-        else:
-            self._service_config = ServiceConfig(service_url=service_url, api_key=api_key) if service_url else None
-            self.connection = Connection(service_url, api_key)
+        if episode_config is not None and config is not None:
+            raise ValueError("Pass either episode_config or config, not both.")
+
+        resolved_service_config = service_config or ServiceConfig(
+            service_url=service_url or DEFAULT_SERVICE_URL,
+            api_key=api_key,
+        )
+
+        self._service_config = resolved_service_config
+        self.connection = Connection(
+            resolved_service_config.service_url,
+            resolved_service_config.api_key,
+        )
 
         self.backend = backend
-        self.config = config or EpisodeConfig()
+        self.config = episode_config or config or EpisodeConfig()
+        self.session_config = self._coerce_session_config(session_config)
 
         # Session-level state (set on connect)
+        self.enabled_tiers: list[str] = list(self.session_config.enabled_tiers or [])
         self.family_display_name: str = ""
         self.family_capabilities: dict[str, Any] = {}
         self.family_config: dict[str, Any] = {}
@@ -149,7 +166,7 @@ class Orchestrator:
                 "tool_step": 0,
                 "budget": ep_ready.budget,
                 "synthesis_cadence": self.server_synthesis_cadence,
-                "enabled_tiers": list(self.family_config.get("enabled_tiers", [])),
+                "enabled_tiers": list(self.enabled_tiers),
                 "family_display_name": self.family_display_name,
                 "curriculum_stage": self.config.stage,
                 "seed_integers": list(episode_seeds),
@@ -312,6 +329,7 @@ class Orchestrator:
             raise TypeError(f"Expected session_ready, received {message.type!r}")
 
         self._session_id = session_id
+        self.enabled_tiers = list(message.enabled_tiers)
         self.family_display_name = message.family_display_name
         self.family_capabilities = dict(message.capabilities)
         self.family_config = dict(message.family_config)
@@ -328,11 +346,8 @@ class Orchestrator:
         return message
 
     async def _create_session_via_http(self) -> str:
-        if self._service_config is None or not self._service_config.session_create_url:
-            raise RuntimeError(
-                "Cannot auto-create a session: no ServiceConfig with session_create_url provided. "
-                "Pass an explicit session_id to run_episode() or provide a ServiceConfig."
-            )
+        if not self._service_config.session_create_url:
+            raise RuntimeError("Cannot auto-create a session: service config is missing session_create_url.")
         return await asyncio.to_thread(self._create_session_sync)
 
     def _create_session_sync(self) -> str:
@@ -341,15 +356,15 @@ class Orchestrator:
             "budget": self.config.max_steps,
             "synthesis_cadence": self.config.synthesis_cadence,
         }
-        if self.config.enabled_tiers is not None:
-            payload["enabled_tiers"] = list(self.config.enabled_tiers)
+        if self.session_config.enabled_tiers is not None:
+            payload["enabled_tiers"] = list(self.session_config.enabled_tiers)
 
         req = request.Request(
-            cfg.session_create_url,  # type: ignore[union-attr]
+            cfg.session_create_url,
             data=json.dumps(payload).encode("utf-8"),
             method="POST",
             headers={
-                "Authorization": f"Bearer {cfg.api_key}",  # type: ignore[union-attr]
+                "Authorization": f"Bearer {cfg.api_key}",
                 "Content-Type": "application/json",
             },
         )
@@ -357,12 +372,24 @@ class Orchestrator:
             with request.urlopen(req, timeout=10) as response:
                 raw = response.read().decode("utf-8")
         except error.URLError as exc:
-            raise RuntimeError(f"Failed to create session at {cfg.session_create_url}: {exc}") from exc  # type: ignore[union-attr]
+            raise RuntimeError(f"Failed to create session at {cfg.session_create_url}: {exc}") from exc
 
         parsed = json.loads(raw)
         if not isinstance(parsed, dict) or "session_id" not in parsed:
             raise RuntimeError("Session creation response did not include a session_id.")
         return str(parsed["session_id"])
+
+    @staticmethod
+    def _coerce_session_config(
+        session_config: SessionConfig | dict[str, Any] | None,
+    ) -> SessionConfig:
+        if session_config is None:
+            return SessionConfig()
+        if isinstance(session_config, SessionConfig):
+            return session_config
+        if isinstance(session_config, dict):
+            return SessionConfig(**session_config)
+        raise TypeError("session_config must be a SessionConfig, mapping, or None")
 
     # ── Prompt construction ───────────────────────────────────────────────────
 

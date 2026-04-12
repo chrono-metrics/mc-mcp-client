@@ -6,13 +6,16 @@
 **Access:** `gcloud run services proxy mc-mcp-ws-service --project=ladder-gym --region=us-central1 --port=9091`  
 **Client:** `mc-mcp-client` commit `d2d8899` (HOTFIX-01e)  
 **Family config:** `{"mode": "zeckendorf", "depth": 20}`  
-**Model:** Scripted backend (see note)  
+**Model:** Scripted backend for the automated smoke suite; `qwen3:8b` via Ollama on `grpo-l4-runner` for the manual live run below  
 
-> **Model note:** Qwen3-8B is not available in the test environment (L4 instance
-> could not start due to zone stockout in us-central1-a).
-> Tests 1, 2, and 4 used a `ScriptedBackend` that sends one `mc.encode` call
-> then stops — sufficient to verify the full protocol path end-to-end.
-> Tests 3 and 5 require a real model and manual execution (see §Status below).
+> **Environment note:** direct requests to the Cloud Run URL returned `401 Unauthorized`
+> without gcloud-authenticated proxying, so all live service runs used
+> `gcloud run services proxy ... --port=9091`.
+> The available L4 runner was `grpo-l4-runner` in `us-east1-b` rather than
+> `us-central1-a`; it initially had no external IP, so a temporary access config
+> was added to download Ollama and `qwen3:8b`.
+> Tests 1, 2, and 4 below still use a `ScriptedBackend`; the real-model findings
+> are recorded in the addendum below.
 
 ---
 
@@ -103,6 +106,88 @@ pytest tests/integration/test_reward_parity.py -v -s
 
 ---
 
+## Addendum: Manual live run with real Qwen3
+
+**Procedure:**
+
+1. Start authenticated Cloud Run proxy locally:
+   ```bash
+   gcloud run services proxy mc-mcp-ws-service \
+       --project=ladder-gym --region=us-central1 --port=9091
+   ```
+2. Use `grpo-l4-runner` in `us-east1-b` to host Ollama with `qwen3:8b`.
+3. Tunnel model port locally:
+   ```bash
+   gcloud compute ssh grpo-l4-runner --project=ladder-gym --zone=us-east1-b \
+       -- -N -L 11434:127.0.0.1:11434
+   ```
+4. Run the thin client against:
+   - service: `ws://127.0.0.1:9091`
+   - model: `http://127.0.0.1:11434/v1`
+
+### Run A: stock thin-client prompt
+
+**Session:** `b4379fd55c78`  
+**Result:** PARTIAL — transport succeeded, episode ended as `parse_error`
+
+- Session creation succeeded with family info and websocket connect succeeded.
+- `VLLMBackend.check_health()` passed against the tunneled Ollama endpoint.
+- The episode completed end-to-end with a server `episode_complete`, but with
+  `0` tool steps and `total_reward=1.75`.
+- Log: `episodes/live_ollama_qwen3/b4379fd55c78.jsonl`
+
+**Observed model failure mode:**
+
+The local Qwen3/Ollama stack answered the first turn with multiple JSON tool
+calls in a single assistant message:
+
+```json
+{"tool": "mc.encode", "args": {"n": 17}}
+{"tool": "mc.encode", "args": {"n": 23}}
+{"tool": "mc.encode", "args": {"n": 42}}
+```
+
+The thin client parser accepts exactly one tool call per turn, so the stock
+wrapper rejected this as malformed and ended the episode with `parse_error`.
+
+### Run B: one-off stricter prompt override
+
+**Session:** `c9b6772f3f58`  
+**Result:** PASS — real episode completed against the live websocket service
+
+```
+steps:         4
+syntheses:     0
+total_reward:  3.1625
+valid_fraction: 0.75
+invalid_call_rate: 0.25
+```
+
+**Tool trace:**
+
+1. `mc.encode(n=17)` → `ok=true`, handle returned
+2. `mc.compare(lhs=h_80963163, rhs=23)` → invalid call from model
+3. `mc.encode(n=23)` → `ok=true`, handle returned
+4. `mc.encode(n=42)` → `ok=true`, handle returned
+
+**Verification:**
+
+- ✅ Live Cloud Run websocket path worked through the thin client.
+- ✅ Real model responses reached the service and produced real `tool_result` messages.
+- ✅ No `config` field was supplied by the client; server-side injection still worked.
+- ✅ Episode completed with finite `total_reward`.
+- ✅ Local log written to `episodes/live_ollama_qwen3_strict/c9b6772f3f58.jsonl`.
+
+**Finding:**
+
+The websocket service path is healthy. The remaining issue is prompt robustness
+for local `qwen3:8b` served through Ollama: the stock thin-client prompt does
+not strongly enforce “exactly one tool call per turn”, and Qwen3 sometimes emits
+batched tool calls that the current parser rejects. Tightening that prompt was
+enough to get a real episode through without any service-side changes.
+
+---
+
 ## Test 4: Model never sends config
 
 **Procedure:** `pytest tests/integration/test_e2e_smoke.py::test_tool_calls_contain_no_config_field`
@@ -158,6 +243,13 @@ SKIPPED test_full_episode_with_qwen3  [MC_MCP_MODEL_URL not set]
 
 9 passed, 1 skipped in 0.69s
 ```
+
+**Manual follow-up:**
+
+- Real-model run executed outside pytest using the live Cloud Run proxy and
+  Ollama-hosted `qwen3:8b`.
+- Stock prompt run completed but stopped as `parse_error`.
+- Stricter prompt override completed a real 4-step episode successfully.
 
 ---
 

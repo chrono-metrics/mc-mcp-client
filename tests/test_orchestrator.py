@@ -8,7 +8,7 @@ import pytest
 from websockets.server import ServerConnection
 
 from mc_mcp_client.backends.base import LLMBackend
-from mc_mcp_client.config import EpisodeConfig
+from mc_mcp_client.config import DEFAULT_SERVICE_URL, EpisodeConfig
 from mc_mcp_client.orchestrator import Orchestrator
 from mc_mcp_client.protocol import EpisodeEnd, Synthesis, ToolCall
 
@@ -472,3 +472,68 @@ def test_system_prompt_excludes_config_field(tmp_path: Path) -> None:
     assert "Emit exactly one tool call per turn." in prompt
     assert "Output exactly one JSON object and nothing else" in prompt
     assert "`mc.compare` and `mc.arithmetic` operate on handles" in prompt
+
+
+def test_orchestrator_defaults_to_hosted_service_without_manual_service_config(tmp_path: Path) -> None:
+    orchestrator = Orchestrator(
+        backend=ScriptedBackend([]),
+        api_key="hosted-key",
+        session_config={"enabled_tiers": ["E0", "E1", "E2"]},
+        episode_config=EpisodeConfig(local_log_dir=str(tmp_path)),
+    )
+
+    assert orchestrator._service_config.service_url == DEFAULT_SERVICE_URL
+    assert orchestrator._service_config.session_create_url == "https://api.mc-mcp.com/v1/sessions"
+    assert orchestrator.connection.service_url == DEFAULT_SERVICE_URL
+    assert orchestrator.connection.api_key == "hosted-key"
+    assert orchestrator.session_config.enabled_tiers == ["E0", "E1", "E2"]
+
+
+def test_create_session_sync_uses_session_config_enabled_tiers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class _Response:
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+
+        def read(self) -> bytes:
+            return b'{"session_id": "sess_123"}'
+
+    def _fake_urlopen(req, timeout: int = 10):
+        del timeout
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _Response()
+
+    monkeypatch.setattr("mc_mcp_client.orchestrator.request.urlopen", _fake_urlopen)
+
+    orchestrator = Orchestrator(
+        backend=ScriptedBackend([]),
+        api_key="svc-key",
+        service_url="ws://example.test:9090",
+        episode_config=EpisodeConfig(local_log_dir=str(tmp_path), max_steps=12, synthesis_cadence=5),
+        session_config={"enabled_tiers": ["E0", "E1", "E2"]},
+    )
+
+    session_id = orchestrator._create_session_sync()
+
+    assert session_id == "sess_123"
+    assert captured["url"] == "http://example.test:9090/v1/sessions"
+    assert captured["body"] == {
+        "budget": 12,
+        "synthesis_cadence": 5,
+        "enabled_tiers": ["E0", "E1", "E2"],
+    }
+
+
+def test_orchestrator_rejects_duplicate_episode_config_aliases(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="either episode_config or config"):
+        Orchestrator(
+            backend=ScriptedBackend([]),
+            episode_config=EpisodeConfig(local_log_dir=str(tmp_path)),
+            config=EpisodeConfig(local_log_dir=str(tmp_path)),
+        )

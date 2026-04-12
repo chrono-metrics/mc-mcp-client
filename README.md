@@ -3,32 +3,18 @@
 Reference client for the [MC-MCP](https://github.com/YOUR_ORG/MC-MCP)
 mathematical reasoning gym.
 
-## Install
+## Getting Started
 
-```
-pip install mc-mcp-client
-```
-
-## Quickstart
-
-```python
-import asyncio
-
-from mc_mcp_client import Orchestrator, VLLMBackend
-
-
-async def main() -> None:
-    orch = Orchestrator(
-        backend=VLLMBackend(model="qwen3-8b", base_url="http://localhost:8080/v1"),
-        service_url="ws://localhost:9090",
-        api_key="mcmcp_dev_key",
-    )
-    result = await orch.run_episode(session_id="my-session-id", seeds=[17, 23, 42])
-    print(f"Reward: {result.total_reward}")
-
-
-asyncio.run(main())
-```
+1. Install:
+   `pip install mc-mcp-client`
+2. Start your model:
+   `vllm serve Qwen/Qwen3-8B --port 8080`
+3. Start the gym:
+   `docker compose up`
+   Run this from the [MC-MCP](https://github.com/YOUR_ORG/MC-MCP) repo.
+4. Edit `examples/quickstart.py` with your model URL and API key, then run:
+   `python examples/quickstart.py`
+5. See your episode log in `./episodes/`
 
 ## Examples
 

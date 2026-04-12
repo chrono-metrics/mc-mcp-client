@@ -5,8 +5,7 @@ from __future__ import annotations
 
 import asyncio
 
-from mc_mcp_client import Orchestrator, VLLMBackend
-from mc_mcp_client.config import EpisodeConfig, ServiceConfig
+from mc_mcp_client import EpisodeConfig, Orchestrator, SessionConfig, VLLMBackend
 
 
 async def main() -> None:
@@ -16,10 +15,9 @@ async def main() -> None:
         base_url="http://localhost:8080/v1",  # <- your model server
     )
 
-    # 2. Configure the gym connection
-    service = ServiceConfig(
-        service_url="ws://localhost:9090",  # <- gym service
-        api_key="mcmcp_dev_key",            # <- your API key
+    # 2. Configure the hosted curriculum session
+    session = SessionConfig(
+        enabled_tiers=["E0", "E1", "E2"],
     )
 
     episode = EpisodeConfig(
@@ -30,7 +28,13 @@ async def main() -> None:
     if not await backend.check_health():
         raise RuntimeError(f"Model server is not reachable at {backend.base_url}")
 
-    orch = Orchestrator(backend=backend, service_config=service, config=episode)
+    orch = Orchestrator(
+        backend=backend,
+        api_key="mcmcp_dev_key",             # <- your API key
+        session_config=session,
+        service_url="ws://localhost:9090",   # <- optional local/self-hosted override
+        episode_config=episode,
+    )
 
     # 3. Run 3 episodes in one session (surprise histograms warm up across episodes)
     results = await orch.run_session(
