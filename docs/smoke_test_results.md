@@ -128,7 +128,8 @@ pytest tests/integration/test_reward_parity.py -v -s
 ### Run A: stock thin-client prompt
 
 **Session:** `b4379fd55c78`  
-**Result:** PARTIAL — transport succeeded, episode ended as `parse_error`
+**Result:** PARTIAL — transport succeeded, but the then-current thin client
+ended the episode as `parse_error`
 
 - Session creation succeeded with family info and websocket connect succeeded.
 - `VLLMBackend.check_health()` passed against the tunneled Ollama endpoint.
@@ -136,7 +137,7 @@ pytest tests/integration/test_reward_parity.py -v -s
   `0` tool steps and `total_reward=1.75`.
 - Log: `episodes/live_ollama_qwen3/b4379fd55c78.jsonl`
 
-**Observed model failure mode:**
+**Observed client compatibility gap:**
 
 The local Qwen3/Ollama stack answered the first turn with multiple JSON tool
 calls in a single assistant message:
@@ -147,8 +148,12 @@ calls in a single assistant message:
 {"tool": "mc.encode", "args": {"n": 42}}
 ```
 
-The thin client parser accepts exactly one tool call per turn, so the stock
-wrapper rejected this as malformed and ended the episode with `parse_error`.
+This is not a service-side bug and not an unexpected model defect. It matches
+the monolith design, which allowed same-turn batches for a small whitelist of
+batchable tools and then concatenated the resulting observation cards. The
+then-current thin client still enforced a stricter one-call-per-turn parser, so
+it rejected this monolith-compatible `mc.encode` batch and ended the episode
+with `parse_error`.
 
 ### Run B: one-off stricter prompt override
 
@@ -180,11 +185,13 @@ invalid_call_rate: 0.25
 
 **Finding:**
 
-The websocket service path is healthy. The remaining issue is prompt robustness
-for local `qwen3:8b` served through Ollama: the stock thin-client prompt does
-not strongly enforce “exactly one tool call per turn”, and Qwen3 sometimes emits
-batched tool calls that the current parser rejects. Tightening that prompt was
-enough to get a real episode through without any service-side changes.
+The websocket service path is healthy. Run A exposed a thin-client
+compatibility regression relative to the monolith conversation loop: the client
+needed to accept same-turn batches for batchable tools such as `mc.encode`
+rather than rejecting them. The service protocol did not need any change.
+Tightening the prompt was a temporary workaround for the old client behavior,
+but the real fix belongs in the client parser/orchestrator so monolith-style
+batchable turns work again.
 
 ---
 

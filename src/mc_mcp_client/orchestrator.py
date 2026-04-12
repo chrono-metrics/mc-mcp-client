@@ -43,7 +43,13 @@ _TEXT_TOOL_CALL_PATTERN = re.compile(
     r"\[?\s*(?:TOOL CALL|tool call)\s*\]?\s*((?:mc|decimal)\.[A-Za-z0-9_]+)\s*(\{.*\})",
     re.DOTALL,
 )
-_BATCHABLE_TOOLS = frozenset({"encode", "capabilities", "session_open", "hist_calibrate"})
+_BATCHABLE_TOOL_NAMES = (
+    "mc.encode",
+    "mc.capabilities",
+    "mc.session_open",
+    "mc.hist_calibrate",
+)
+_BATCHABLE_TOOLS = frozenset(tool_name.partition(".")[2] for tool_name in _BATCHABLE_TOOL_NAMES)
 
 
 @dataclass
@@ -436,6 +442,7 @@ class Orchestrator:
 
         stop_text = " | ".join(self.config.stop_phrases)
         prior_text = self._format_prior_conjectures()
+        batchable_tools = self._batchable_tool_list()
 
         return (
             f"You are a mathematical discovery agent exploring the {family_name} representation family.\n\n"
@@ -447,8 +454,10 @@ class Orchestrator:
             f"Synthesis cadence: every {self.server_synthesis_cadence} tool calls.\n\n"
             "Tool protocol:\n"
             "- The active family/config for this run is fixed. Provide only semantic arguments; do NOT include a 'config' field.\n"
-            "- Emit exactly one tool call per turn.\n"
-            "- Output exactly one JSON object and nothing else: no prose, no markdown fences, no backticks, no surrounding commentary.\n"
+            "- Prefer exactly one tool call per turn.\n"
+            "- Default format: output exactly one JSON object and nothing else: no prose, no markdown fences, no backticks, no surrounding commentary.\n"
+            f"- Same-turn batches are allowed only when every tool is one of {batchable_tools}. If you batch, emit multiple newline-delimited JSON objects and nothing else.\n"
+            "- A batch containing any other tool is invalid; do not batch `mc.compare`, `mc.arithmetic`, `mc.inspect`, `mc.score_surprise`, or synthesis text.\n"
             '  Example: {"tool": "mc.encode", "args": {"n": 42}}\n'
             '  Example: {"tool": "mc.inspect", "args": {"handle": "h_abc", "view": "prefix"}}\n'
             '  Example: {"tool": "mc.arithmetic", "args": {"op": "add", "lhs": "h_abc", "rhs": "h_def"}}\n'
@@ -461,8 +470,10 @@ class Orchestrator:
         )
 
     def _build_retry_prompt(self) -> str:
+        batchable_tools = self._batchable_tool_list()
         return (
-            "Respond again with exactly one tool call as a single JSON object and nothing else. "
+            "Respond again with one tool call as a single JSON object and nothing else. "
+            f"If you must batch in the same turn, emit multiple newline-delimited JSON objects and make every tool one of {batchable_tools}; any other batch is invalid. "
             "Do not include prose, markdown fences, or a `config` field. "
             'Format: {"tool": "mc.encode", "args": {"n": 42}}. '
             "If you truly want to stop, say exactly: I have no more conjectures to explore."
@@ -759,6 +770,7 @@ class Orchestrator:
         return target_dir / f"{session_id}.jsonl"
 
     def _build_seed_prompt(self, seeds: list[int]) -> str:
+        batchable_tools = self._batchable_tool_list()
         if seeds:
             seed_text = ", ".join(str(value) for value in seeds)
         else:
@@ -767,7 +779,7 @@ class Orchestrator:
             "Start the discovery episode.\n"
             f"Seed integers: {seed_text}\n"
             "You will receive compressed observation cards after each tool call.\n"
-            "On tool turns, emit exactly one tool call as a single JSON object.\n"
+            f"On tool turns, prefer one tool call as a single JSON object. You may batch only {batchable_tools} by emitting multiple newline-delimited JSON objects; any batch containing another tool is invalid.\n"
             "When a synthesis is requested, write plain text only: one concise conjecture or falsification plan."
         )
 
@@ -954,3 +966,7 @@ class Orchestrator:
     def _is_batchable_tool(tool_name: str) -> bool:
         _, _, operation = tool_name.partition(".")
         return operation in _BATCHABLE_TOOLS
+
+    @staticmethod
+    def _batchable_tool_list() -> str:
+        return ", ".join(f"`{tool_name}`" for tool_name in _BATCHABLE_TOOL_NAMES)
