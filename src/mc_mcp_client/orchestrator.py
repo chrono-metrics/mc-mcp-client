@@ -227,7 +227,7 @@ class Orchestrator:
                 if not isinstance(parsed, ToolCall):
                     logger.warning("Model response did not parse as a tool call; requesting one retry.")
                     messages.append({"role": "assistant", "content": response_text.strip() or "[empty assistant response]"})
-                    messages.append({"role": "user", "content": "Please respond with a valid tool call in JSON format."})
+                    messages.append({"role": "user", "content": self._build_retry_prompt()})
 
                     retry_text = await self.backend.generate(
                         messages,
@@ -383,19 +383,34 @@ class Orchestrator:
         prior_text = self._format_prior_conjectures()
 
         return (
-            f"You are a mathematical exploration agent investigating the "
-            f"{family_name} representation family.\n\n"
+            f"You are a mathematical discovery agent exploring the {family_name} representation family.\n\n"
+            "Follow the active family and tools for this run. "
+            "You will receive only compressed observation cards after each tool call. "
+            "Handles are opaque ids: reuse them exactly and never infer meaning from the handle string.\n\n"
             f"{ops_text}\n\n"
-            f"Your tool budget is {self.budget_per_episode} calls per episode. "
-            f"Synthesize your findings every {self.server_synthesis_cadence} tool calls.\n\n"
-            "When calling tools, provide only semantic arguments — do NOT include a 'config' field. Examples:\n"
-            '  Encode a value:   {"tool": "mc.encode", "args": {"n": 42}}\n'
-            '  Add two handles:  {"tool": "mc.arithmetic", "args": {"op": "add", "lhs": "h_abc", "rhs": "h_def"}}\n'
-            '  Inspect a handle: {"tool": "mc.inspect", "args": {"handle": "h_abc"}}\n'
-            '  Compare handles:  {"tool": "mc.compare", "args": {"lhs": "h_abc", "rhs": "h_def"}}\n\n'
+            f"Budget: {self.budget_per_episode} tool calls per episode. "
+            f"Synthesis cadence: every {self.server_synthesis_cadence} tool calls.\n\n"
+            "Tool protocol:\n"
+            "- The active family/config for this run is fixed. Provide only semantic arguments; do NOT include a 'config' field.\n"
+            "- Emit exactly one tool call per turn.\n"
+            "- Output exactly one JSON object and nothing else: no prose, no markdown fences, no backticks, no surrounding commentary.\n"
+            '  Example: {"tool": "mc.encode", "args": {"n": 42}}\n'
+            '  Example: {"tool": "mc.inspect", "args": {"handle": "h_abc", "view": "prefix"}}\n'
+            '  Example: {"tool": "mc.arithmetic", "args": {"op": "add", "lhs": "h_abc", "rhs": "h_def"}}\n'
+            "- `mc.compare` and `mc.arithmetic` operate on handles. If you want to compare or combine a fresh integer, encode it first.\n"
+            "- Do not repeat the same tool call with the same args unless the last result created a new reason.\n\n"
+            "When synthesis is requested, do not call a tool. Write plain text only: one falsifiable conjecture or one concrete falsification plan grounded in the observed cards.\n"
             "Good conjectures generalize beyond the examples seen, are falsifiable, and point to the next discriminating test.\n"
-            f"To stop, say one of: {stop_text}\n"
+            f"To stop, say exactly one of: {stop_text}\n"
             f"{prior_text}"
+        )
+
+    def _build_retry_prompt(self) -> str:
+        return (
+            "Respond again with exactly one tool call as a single JSON object and nothing else. "
+            "Do not include prose, markdown fences, or a `config` field. "
+            'Format: {"tool": "mc.encode", "args": {"n": 42}}. '
+            "If you truly want to stop, say exactly: I have no more conjectures to explore."
         )
 
     def _format_prior_conjectures(self) -> str:
@@ -618,14 +633,15 @@ class Orchestrator:
             "Start the discovery episode.\n"
             f"Seed integers: {seed_text}\n"
             "You will receive compressed observation cards after each tool call.\n"
-            "When a synthesis is requested, state one concise conjecture or falsification plan."
+            "On tool turns, emit exactly one tool call as a single JSON object.\n"
+            "When a synthesis is requested, write plain text only: one concise conjecture or falsification plan."
         )
 
     def _build_synthesis_prompt(self, required: SynthesisRequired) -> str:
         return (
             f"[SYNTHESIS REQUIRED - step {required.step}]\n"
             f"reward_so_far={required.reward_so_far} budget_remaining={required.budget_remaining}\n"
-            "State one falsifiable conjecture or a concrete falsification plan based on the observations so far."
+            "Do not call a tool or output JSON. State one falsifiable conjecture or a concrete falsification plan based on the observations so far."
         )
 
     def _summarize_tool_result(self, result: ToolResult) -> str:

@@ -186,7 +186,11 @@ async def test_run_episode_handles_tool_synthesis_and_stop(mock_websocket_server
     assert first_prompt[0]["role"] == "system"
     assert "Zeckendorf" in first_prompt[0]["content"]
     assert "do NOT include a 'config' field" in first_prompt[0]["content"]
+    assert "Emit exactly one tool call per turn." in first_prompt[0]["content"]
+    assert "Output exactly one JSON object and nothing else" in first_prompt[0]["content"]
+    assert "`mc.compare` and `mc.arithmetic` operate on handles" in first_prompt[0]["content"]
     assert "Seed integers: 5, 8, 13" in first_prompt[1]["content"]
+    assert "emit exactly one tool call as a single JSON object" in first_prompt[1]["content"]
 
     log_path = tmp_path / f"{session_id}.jsonl"
     assert log_path.exists()
@@ -274,7 +278,11 @@ async def test_run_episode_retries_once_after_parse_failure(mock_websocket_serve
     assert received_messages[0]["args"] == {"handle": "h_dead", "view": "prefix"}
     assert received_messages[1] == {"type": "episode_end", "reason": "no_more_conjectures"}
     assert any(
-        message["role"] == "user" and "valid tool call in JSON format" in message["content"]
+        message["role"] == "user" and "exactly one tool call as a single JSON object" in message["content"]
+        for message in backend.calls[1]
+    )
+    assert any(
+        message["role"] == "user" and "Do not include prose, markdown fences, or a `config` field." in message["content"]
         for message in backend.calls[1]
     )
 
@@ -461,3 +469,6 @@ def test_system_prompt_excludes_config_field(tmp_path: Path) -> None:
     assert "Zeckendorf" in prompt
     # Must have the no-config instruction
     assert "do NOT include a 'config' field" in prompt
+    assert "Emit exactly one tool call per turn." in prompt
+    assert "Output exactly one JSON object and nothing else" in prompt
+    assert "`mc.compare` and `mc.arithmetic` operate on handles" in prompt
