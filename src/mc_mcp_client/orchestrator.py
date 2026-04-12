@@ -8,7 +8,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -43,6 +43,12 @@ _TEXT_TOOL_CALL_PATTERN = re.compile(
     r"\[?\s*(?:TOOL CALL|tool call)\s*\]?\s*((?:mc|decimal)\.[A-Za-z0-9_]+)\s*(\{.*\})",
     re.DOTALL,
 )
+_BATCHABLE_TOOLS = frozenset({"encode", "capabilities", "session_open", "hist_calibrate"})
+
+
+@dataclass
+class _ToolBatch:
+    tool_calls: list[ToolCall]
 
 
 class Orchestrator:
@@ -283,7 +289,7 @@ class Orchestrator:
                         log_path=log_path,
                     )
 
-                if not isinstance(parsed, ToolCall):
+                if not isinstance(parsed, (ToolCall, _ToolBatch)):
                     logger.warning("Model response did not parse as a tool call; requesting one retry.")
                     messages.append({"role": "assistant", "content": response_text.strip() or "[empty assistant response]"})
                     messages.append({"role": "user", "content": self._build_retry_prompt()})
@@ -294,14 +300,15 @@ class Orchestrator:
                         temperature=self.config.temperature,
                     )
                     retry_parsed = self._parse_model_response(retry_text)
-                    messages.append({"role": "assistant", "content": retry_text.strip() or "[empty assistant response]"})
 
                     if isinstance(retry_parsed, EpisodeEnd):
+                        messages.append({"role": "assistant", "content": retry_text.strip() or retry_parsed.reason})
                         return await self._finalize_episode(
                             reason=retry_parsed.reason,
                             log_path=log_path,
                         )
-                    if not isinstance(retry_parsed, ToolCall):
+                    if not isinstance(retry_parsed, (ToolCall, _ToolBatch)):
+                        messages.append({"role": "assistant", "content": retry_text.strip() or "[empty assistant response]"})
                         logger.warning("Model failed to produce a valid tool call after retry; ending episode.")
                         return await self._finalize_episode(
                             reason="parse_error",
@@ -310,50 +317,15 @@ class Orchestrator:
 
                     parsed = retry_parsed
                     response_text = retry_text
-                else:
-                    messages.append({"role": "assistant", "content": response_text.strip() or self._tool_call_text(parsed)})
-
-                parsed.id = parsed.id or self._next_tool_id()
-                await self.connection.send(asdict(parsed))
-                result = await self._wait_for_tool_result()
-                current_step = max(current_step, result.step)
-
-                observation = self._compress_to_observation_card(parsed.tool, result)
-                messages.append({"role": "user", "content": observation})
-                self._append_log_event(
-                    log_path,
-                    {
-                        "event_type": "tool_step",
-                        "step": result.step,
-                        "tool_step": result.step,
-                        "tool": parsed.tool,
-                        "tool_name": parsed.tool,
-                        "args": dict(parsed.args),
-                        "arguments": dict(parsed.args),
-                        "ok": result.ok,
-                        "full_response": asdict(result),
-                        "observation_card": observation,
-                        "reward_so_far": result.reward_so_far,
-                        "reward_multiplier": result.reward_multiplier,
-                        "budget_remaining": result.budget_remaining,
-                    },
+                current_step, turn_complete, pending_synthesis_prompt = await self._execute_tool_turn(
+                    parsed=parsed,
+                    response_text=response_text,
+                    messages=messages,
+                    log_path=log_path,
+                    current_step=current_step,
                 )
-
-                if self._should_stop(result):
-                    return await self._finalize_episode(
-                        reason="budget_exhausted",
-                        log_path=log_path,
-                    )
-
-                followup_complete, followup_prompt = await self._drain_followup_messages(messages)
-                if followup_complete is not None:
-                    self._append_episode_end_event(
-                        log_path=log_path,
-                        reason="server_complete",
-                        complete=followup_complete,
-                    )
-                    return followup_complete
-                pending_synthesis_prompt = followup_prompt
+                if turn_complete is not None:
+                    return turn_complete
         finally:
             if owns_connection:
                 await self.connection.close()
@@ -557,7 +529,10 @@ class Orchestrator:
             f"prior_relevant={prior_relevant} reward_multiplier={scored.reward_multiplier}"
         )
 
-    def _parse_model_response(self, response: str) -> ToolCall | Synthesis | EpisodeEnd:
+    def _parse_model_response(
+        self,
+        response: str,
+    ) -> ToolCall | _ToolBatch | Synthesis | EpisodeEnd:
         """Parse model text into a tool call, synthesis, or episode end."""
         stripped = response.strip()
         if self._signals_stop(stripped):
@@ -566,6 +541,14 @@ class Orchestrator:
         text_tool_call = self._parse_text_tool_call(stripped)
         if text_tool_call is not None:
             return text_tool_call
+
+        streamed_tool_calls = self._parse_json_tool_calls(stripped)
+        if streamed_tool_calls is not None:
+            if len(streamed_tool_calls) == 1:
+                return streamed_tool_calls[0]
+            if all(self._is_batchable_tool(tool_call.tool) for tool_call in streamed_tool_calls):
+                return _ToolBatch(tool_calls=streamed_tool_calls)
+            return Synthesis(text=stripped)
 
         try:
             payload = self._extract_json_object(stripped)
@@ -638,6 +621,74 @@ class Orchestrator:
                 skipped.append(message)
         finally:
             self._requeue_front(skipped)
+
+    async def _execute_tool_turn(
+        self,
+        *,
+        parsed: ToolCall | _ToolBatch,
+        response_text: str,
+        messages: list[dict[str, str]],
+        log_path: Path,
+        current_step: int,
+    ) -> tuple[int, EpisodeComplete | None, str | None]:
+        tool_calls = [parsed] if isinstance(parsed, ToolCall) else list(parsed.tool_calls)
+        assistant_content = response_text.strip() or self._tool_calls_text(tool_calls)
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        observations: list[str] = []
+        followup_messages: list[dict[str, str]] = []
+
+        for tool_call in tool_calls:
+            tool_call.id = tool_call.id or self._next_tool_id()
+            await self.connection.send(asdict(tool_call))
+            result = await self._wait_for_tool_result()
+            current_step = max(current_step, result.step)
+
+            observation = self._compress_to_observation_card(tool_call.tool, result)
+            observations.append(observation)
+            self._append_log_event(
+                log_path,
+                {
+                    "event_type": "tool_step",
+                    "step": result.step,
+                    "tool_step": result.step,
+                    "tool": tool_call.tool,
+                    "tool_name": tool_call.tool,
+                    "args": dict(tool_call.args),
+                    "arguments": dict(tool_call.args),
+                    "ok": result.ok,
+                    "full_response": asdict(result),
+                    "observation_card": observation,
+                    "reward_so_far": result.reward_so_far,
+                    "reward_multiplier": result.reward_multiplier,
+                    "budget_remaining": result.budget_remaining,
+                },
+            )
+
+            if self._should_stop(result):
+                self._append_observations(messages, observations, followup_messages)
+                complete = await self._finalize_episode(
+                    reason="budget_exhausted",
+                    log_path=log_path,
+                )
+                return current_step, complete, None
+
+            followup_complete, followup_prompt = await self._drain_followup_messages(followup_messages)
+            if followup_complete is not None:
+                self._append_observations(messages, observations, followup_messages)
+                self._append_episode_end_event(
+                    log_path=log_path,
+                    reason="server_complete",
+                    complete=followup_complete,
+                )
+                return current_step, followup_complete, None
+
+            if followup_prompt is not None:
+                self._append_observations(messages, observations, followup_messages)
+                return current_step, None, followup_prompt
+
+        self._append_observations(messages, observations, followup_messages)
+        return current_step, None, None
 
     async def _drain_followup_messages(
         self,
@@ -777,6 +828,43 @@ class Orchestrator:
             raise TypeError("text tool call arguments must decode to an object")
         return ToolCall(tool=match.group(1), args=dict(arguments))
 
+    def _parse_json_tool_calls(self, text: str) -> list[ToolCall] | None:
+        candidate = self._unwrap_json_fence(text)
+        if not candidate:
+            return None
+
+        decoder = json.JSONDecoder()
+        tool_calls: list[ToolCall] = []
+        index = 0
+
+        try:
+            while index < len(candidate):
+                while index < len(candidate) and candidate[index].isspace():
+                    index += 1
+                if index >= len(candidate):
+                    break
+
+                payload, index = decoder.raw_decode(candidate, idx=index)
+                if not isinstance(payload, dict):
+                    return None
+
+                tool_name = payload.get("tool") or payload.get("name")
+                args = payload.get("args", payload.get("arguments", payload.get("input", {})))
+                if not isinstance(tool_name, str) or not isinstance(args, dict):
+                    return None
+
+                tool_calls.append(
+                    ToolCall(
+                        id=str(payload.get("id") or ""),
+                        tool=tool_name,
+                        args=dict(args),
+                    )
+                )
+        except json.JSONDecodeError:
+            return None
+
+        return tool_calls or None
+
     def _extract_json_object(self, text: str) -> dict[str, Any]:
         if not text:
             raise ValueError("empty JSON response")
@@ -812,6 +900,9 @@ class Orchestrator:
     def _tool_call_text(self, tool_call: ToolCall) -> str:
         return json.dumps({"tool": tool_call.tool, "args": tool_call.args}, ensure_ascii=False)
 
+    def _tool_calls_text(self, tool_calls: list[ToolCall]) -> str:
+        return "\n".join(self._tool_call_text(tool_call) for tool_call in tool_calls)
+
     def _append_log_event(self, log_path: Path, event: dict[str, Any]) -> None:
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, sort_keys=True))
@@ -838,3 +929,28 @@ class Orchestrator:
         if isinstance(value, float):
             return f"{value:.6g}"
         return str(value)
+
+    @staticmethod
+    def _append_observations(
+        messages: list[dict[str, str]],
+        observations: list[str],
+        followup_messages: list[dict[str, str]],
+    ) -> None:
+        if observations:
+            messages.append({"role": "user", "content": "\n\n".join(observations)})
+        messages.extend(followup_messages)
+
+    @staticmethod
+    def _unwrap_json_fence(text: str) -> str:
+        stripped = text.strip()
+        if not stripped.startswith("```") or not stripped.endswith("```"):
+            return stripped
+        lines = stripped.splitlines()
+        if len(lines) < 2 or lines[-1].strip() != "```":
+            return stripped
+        return "\n".join(lines[1:-1]).strip()
+
+    @staticmethod
+    def _is_batchable_tool(tool_name: str) -> bool:
+        _, _, operation = tool_name.partition(".")
+        return operation in _BATCHABLE_TOOLS
