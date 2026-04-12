@@ -88,16 +88,21 @@ On success the server immediately sends a `session_ready` message (see §2.1).
 
 ### 2.1 `session_ready`
 
-Sent once, immediately after the WebSocket handshake succeeds.
+Sent once, immediately after the WebSocket handshake succeeds. Contains
+session-level (not episode-level) configuration including the representation
+family the session is bound to.
 
 ```json
 {
   "type": "session_ready",
   "session_id": "abc123def456",
   "enabled_tiers": ["E0", "E1", "E2"],
-  "budget": 40,
+  "budget_per_episode": 40,
   "synthesis_cadence": 8,
   "tool_count": 14,
+  "family_display_name": "Zeckendorf",
+  "family_config": {"ladder_mode": "standard"},
+  "capabilities": {"arithmetic": true, "zoom": true, "divide_in_family": false},
   "step": 0
 }
 ```
@@ -106,12 +111,49 @@ Sent once, immediately after the WebSocket handshake succeeds.
 |-------|------|-------------|
 | `session_id` | string | Echo of the session ID |
 | `enabled_tiers` | string[] | Active representation tiers |
-| `budget` | int | Total tool-call budget for this episode |
+| `budget_per_episode` | int | Default tool-call budget per episode |
 | `synthesis_cadence` | int | Steps between required syntheses |
 | `tool_count` | int | Number of tools available |
+| `family_display_name` | string | Human-readable name of the representation family |
+| `family_config` | object | Server-side family config (opaque; injected into tool calls automatically) |
+| `capabilities` | object | Map of capability name → bool (whether that op is supported for this family) |
 | `step` | int | Always `0` on connect |
 
-### 2.2 `tool_result`
+### 2.2 `episode_ready`
+
+Sent by the server in response to an `episode_start` message from the client.
+Contains per-episode state including the server-assigned episode ID, seeds, and
+any prior conjectures from earlier episodes in this session.
+
+```json
+{
+  "type": "episode_ready",
+  "id": "ep_1",
+  "episode_id": "abc123def456_ep1",
+  "episode_number": 1,
+  "seeds": [17, 23, 42],
+  "budget": 40,
+  "prior_conjectures": [
+    {
+      "id": "conj_abc",
+      "text": "Digit mass is monotone.",
+      "state": "open",
+      "survival": 3
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Echoes the `id` from the `episode_start` message |
+| `episode_id` | string | Server-assigned episode identifier |
+| `episode_number` | int | 1-based episode index within this session |
+| `seeds` | int[] | Seed integers for this episode (echoed from request, or server-chosen) |
+| `budget` | int | Tool-call budget for this specific episode |
+| `prior_conjectures` | object[] | Conjectures produced in earlier episodes of this session |
+
+### 2.3 `tool_result`
 
 Response to a `tool_call` request.
 
@@ -160,7 +202,7 @@ When `ok` is `false`, `data` contains `"error"` (error code string) and
 | `reward_so_far` | float | Cumulative episode reward at this step |
 | `reward_multiplier` | float | Current synthesis-cadence multiplier (see §4) |
 
-### 2.3 `synthesis_required`
+### 2.4 `synthesis_required`
 
 Sent when the tool-call count reaches a synthesis cadence boundary
 (`step % synthesis_cadence == 0`). The client **must** respond with a
@@ -177,7 +219,7 @@ reward multiplier to decay (see §4).
 }
 ```
 
-### 2.4 `synthesis_scored`
+### 2.5 `synthesis_scored`
 
 Sent after the server scores a `synthesis` message.
 
@@ -204,7 +246,7 @@ Sent after the server scores a `synthesis` message.
 | `prior_relevant` | object[] | Previously seen conjectures with high semantic overlap |
 | `reward_multiplier` | float | Multiplier reset to `1.0` after a successful synthesis |
 
-### 2.5 `episode_complete`
+### 2.6 `episode_complete`
 
 Sent when the episode ends (either via `episode_end` from the client, or
 budget exhaustion).
@@ -224,7 +266,7 @@ budget exhaustion).
 }
 ```
 
-### 2.6 `error`
+### 2.7 `error`
 
 Sent for protocol-level errors (as opposed to tool-level errors, which arrive
 inside `tool_result`).
@@ -257,7 +299,7 @@ Tool-specific failure codes (carried inside `tool_result.data.error`):
 `session_open_failed`, `hist_calibrate_failed`, `score_surprise_failed`,
 `arithmetic_failed`, `normalize_failed`, `inspect_failed`.
 
-### 2.7 `ping`
+### 2.8 `ping`
 
 Sent by the server every **30 seconds** as a heartbeat. The client must reply
 with a `pong` within **10 seconds** or the connection will be closed with code
@@ -271,7 +313,29 @@ with a `pong` within **10 seconds** or the connection will be closed with code
 
 ## 3. Client → Server Messages
 
-### 3.1 `tool_call`
+### 3.1 `episode_start`
+
+Sent to begin a new episode within the current session. The server responds
+with `episode_ready`. Multiple episodes can be run on a single WebSocket
+connection; the server's surprise histogram accumulates across them.
+
+```json
+{
+  "type": "episode_start",
+  "id": "ep_1",
+  "seeds": [17, 23, 42]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Client-assigned correlation ID; echoed in `episode_ready` |
+| `seeds` | int[] or null | Seed integers for this episode; null lets the server choose |
+
+### 3.3 `tool_call`
+
+Tool call arguments must **not** include a `config` field — the representation
+family is set for the session and injected by the server automatically.
 
 ```json
 {
@@ -286,9 +350,9 @@ with a `pong` within **10 seconds** or the connection will be closed with code
 |-------|------|-------------|
 | `id` | string | Client-assigned correlation ID; echoed in `tool_result` |
 | `tool` | string | Tool name (see §5) |
-| `args` | object | Tool-specific arguments |
+| `args` | object | Semantic tool arguments only — no `config` key |
 
-### 3.2 `synthesis`
+### 3.4 `synthesis`
 
 Submits a free-text conjecture or summary. Required at each synthesis cadence
 boundary.
@@ -301,7 +365,7 @@ boundary.
 }
 ```
 
-### 3.3 `episode_end`
+### 3.5 `episode_end`
 
 Gracefully terminates the episode. The server responds with `episode_complete`.
 
@@ -314,7 +378,7 @@ Gracefully terminates the episode. The server responds with `episode_complete`.
 
 Valid reasons: `no_more_conjectures`, `client_stop`, `budget_exhausted`.
 
-### 3.4 `pong`
+### 3.6 `pong`
 
 Reply to a server `ping`. Must be sent within 10 seconds.
 
@@ -399,7 +463,7 @@ session. A new episode requires a new `POST /v1/sessions` call.
 
 ---
 
-## 8. Typical Episode Flow
+## 8. Typical Session Flow (multiple episodes)
 
 ```
 Client                          Server
@@ -408,20 +472,39 @@ Client                          Server
   │◄─ 200 {session_id, ws_url} ───│
   │                               │
   │── WS connect ────────────────►│
-  │◄─ session_ready ──────────────│
+  │◄─ session_ready ──────────────│  (family info, budget_per_episode, capabilities)
+  │                               │
+  │  ── Episode 1 ────────────────│
+  │── episode_start ─────────────►│
+  │◄─ episode_ready ──────────────│  (seeds, budget, prior_conjectures=[])
   │                               │
   │── tool_call (mc.encode) ─────►│
   │◄─ tool_result ────────────────│
-  │   ... (repeat up to 8 steps)  │
-  │                               │
+  │   ... (repeat up to cadence)  │
   │◄─ synthesis_required ─────────│
   │── synthesis ─────────────────►│
   │◄─ synthesis_scored ───────────│
-  │                               │
   │   ... (more tool calls) ──────│
+  │── episode_end ───────────────►│
+  │◄─ episode_complete ───────────│
   │                               │
+  │  ── Episode 2 ────────────────│
+  │── episode_start ─────────────►│
+  │◄─ episode_ready ──────────────│  (prior_conjectures=[...] from ep 1)
+  │   ... same pattern ...        │
   │── episode_end ───────────────►│
   │◄─ episode_complete ───────────│
   │                               │
   │── WS close ──────────────────►│
 ```
+
+### Key points
+
+- **Session = one WebSocket connection, N episodes.** Call `episode_start` /
+  `episode_ready` to begin each episode; the surprise histogram accumulates
+  across episodes within a session.
+- **No `config` in tool calls.** The representation family is stored server-side
+  and injected automatically. Only pass semantic arguments.
+- **`prior_conjectures`** in `episode_ready` contains conjectures produced in
+  earlier episodes of the same session. Use them to avoid repetition and to
+  direct exploration.

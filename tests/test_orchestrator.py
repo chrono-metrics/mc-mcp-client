@@ -35,16 +35,63 @@ class ScriptedBackend(LLMBackend):
         return True
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _episode_ready(
+    session_id: str,
+    *,
+    episode_number: int = 1,
+    seeds: list[int] | None = None,
+    budget: int = 40,
+    prior_conjectures: list[dict] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "type": "episode_ready",
+            "id": f"ep_{episode_number}",
+            "episode_id": f"{session_id}_ep{episode_number}",
+            "episode_number": episode_number,
+            "seeds": seeds or [],
+            "budget": budget,
+            "prior_conjectures": prior_conjectures or [],
+        }
+    )
+
+
+async def _recv_episode_start(connection: ServerConnection) -> dict:
+    """Receive and return an episode_start message from the client."""
+    raw = await connection.recv()
+    msg = json.loads(raw)
+    assert msg["type"] == "episode_start", f"Expected episode_start, got {msg['type']!r}"
+    return msg
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+
 @pytest.mark.asyncio
 async def test_run_episode_handles_tool_synthesis_and_stop(mock_websocket_server, tmp_path: Path) -> None:
     session_id = "episode-happy-path"
     mock_websocket_server.add_session(
         session_id,
-        ready_overrides={"budget": 2, "synthesis_cadence": 1, "enabled_tiers": ["E0", "E1", "E2"]},
+        ready_overrides={
+            "budget_per_episode": 2,
+            "synthesis_cadence": 1,
+            "enabled_tiers": ["E0", "E1", "E2"],
+            "family_display_name": "Zeckendorf",
+            "capabilities": {"arithmetic": True, "zoom": False},
+        },
     )
     received_messages: list[dict] = []
 
     async def episode_handler(connection: ServerConnection, _: str) -> None:
+        ep_start = await _recv_episode_start(connection)
+        received_messages.append(ep_start)
+        await connection.send(
+            _episode_ready(session_id, episode_number=1, seeds=[5, 8, 13], budget=2)
+        )
+
         tool_call = json.loads(await connection.recv())
         received_messages.append(tool_call)
         await connection.send(
@@ -127,15 +174,18 @@ async def test_run_episode_handles_tool_synthesis_and_stop(mock_websocket_server
 
     assert result.total_reward == pytest.approx(1.25)
     assert result.steps == 1
-    assert received_messages[0]["type"] == "tool_call"
-    assert received_messages[0]["tool"] == "mc.encode"
-    assert received_messages[1]["type"] == "synthesis"
-    assert "Conjecture:" in received_messages[1]["text"]
-    assert received_messages[2] == {"type": "episode_end", "reason": "no_more_conjectures"}
+    # received_messages: [episode_start, tool_call, synthesis, episode_end]
+    assert received_messages[0]["type"] == "episode_start"
+    assert received_messages[1]["type"] == "tool_call"
+    assert received_messages[1]["tool"] == "mc.encode"
+    assert received_messages[2]["type"] == "synthesis"
+    assert "Conjecture:" in received_messages[2]["text"]
+    assert received_messages[3] == {"type": "episode_end", "reason": "no_more_conjectures"}
 
     first_prompt = backend.calls[0]
     assert first_prompt[0]["role"] == "system"
-    assert "Available tiers: E0, E1, E2" in first_prompt[0]["content"]
+    assert "Zeckendorf" in first_prompt[0]["content"]
+    assert "do NOT include a 'config' field" in first_prompt[0]["content"]
     assert "Seed integers: 5, 8, 13" in first_prompt[1]["content"]
 
     log_path = tmp_path / f"{session_id}.jsonl"
@@ -157,11 +207,16 @@ async def test_run_episode_retries_once_after_parse_failure(mock_websocket_serve
     session_id = "episode-parse-retry"
     mock_websocket_server.add_session(
         session_id,
-        ready_overrides={"budget": 3, "synthesis_cadence": 8},
+        ready_overrides={"budget_per_episode": 3, "synthesis_cadence": 8},
     )
     received_messages: list[dict] = []
 
     async def parse_retry_handler(connection: ServerConnection, _: str) -> None:
+        await _recv_episode_start(connection)
+        await connection.send(
+            _episode_ready(session_id, episode_number=1, seeds=[], budget=3)
+        )
+
         tool_call = json.loads(await connection.recv())
         received_messages.append(tool_call)
         await connection.send(
@@ -224,6 +279,141 @@ async def test_run_episode_retries_once_after_parse_failure(mock_websocket_serve
     )
 
 
+@pytest.mark.asyncio
+async def test_run_session_runs_multiple_episodes(mock_websocket_server, tmp_path: Path) -> None:
+    session_id = "multi-episode-session"
+    mock_websocket_server.add_session(
+        session_id,
+        ready_overrides={
+            "budget_per_episode": 5,
+            "synthesis_cadence": 8,
+            "family_display_name": "Fibonacci",
+        },
+    )
+
+    async def multi_episode_handler(connection: ServerConnection, _: str) -> None:
+        # Episode 1
+        ep_start_1 = await _recv_episode_start(connection)
+        assert ep_start_1["seeds"] == [17, 23]
+        await connection.send(_episode_ready(session_id, episode_number=1, seeds=[17, 23], budget=5))
+        ep_end_1 = json.loads(await connection.recv())
+        assert ep_end_1["type"] == "episode_end"
+        await connection.send(
+            json.dumps(
+                {
+                    "type": "episode_complete",
+                    "total_reward": 0.5,
+                    "reward_breakdown": {},
+                    "steps": 0,
+                    "syntheses": 0,
+                    "conjectures_produced": 0,
+                    "conjectures_board_eligible": 0,
+                }
+            )
+        )
+        # Episode 2
+        ep_start_2 = await _recv_episode_start(connection)
+        assert ep_start_2["seeds"] == [42, 55]
+        await connection.send(_episode_ready(session_id, episode_number=2, seeds=[42, 55], budget=5))
+        ep_end_2 = json.loads(await connection.recv())
+        assert ep_end_2["type"] == "episode_end"
+        await connection.send(
+            json.dumps(
+                {
+                    "type": "episode_complete",
+                    "total_reward": 1.0,
+                    "reward_breakdown": {},
+                    "steps": 0,
+                    "syntheses": 0,
+                    "conjectures_produced": 0,
+                    "conjectures_board_eligible": 0,
+                }
+            )
+        )
+        await connection.wait_closed()
+
+    # Single handler covers both episodes on the same connection
+    mock_websocket_server.queue_handler(session_id, multi_episode_handler)
+
+    backend = ScriptedBackend(
+        [
+            "No more conjectures to explore.",  # episode 1
+            "No more conjectures to explore.",  # episode 2
+        ]
+    )
+    orchestrator = Orchestrator(
+        backend=backend,
+        service_url=mock_websocket_server.service_url,
+        api_key=mock_websocket_server.api_key,
+        config=EpisodeConfig(local_log_dir=str(tmp_path)),
+    )
+
+    # Manually connect (simulating run_session's _connect step)
+    await orchestrator._connect(session_id)
+    results = []
+    for ep, seeds in enumerate([[17, 23], [42, 55]], start=1):
+        result = await orchestrator.run_episode(seeds=seeds)
+        results.append(result)
+    await orchestrator.connection.close()
+
+    assert len(results) == 2
+    assert results[0].total_reward == pytest.approx(0.5)
+    assert results[1].total_reward == pytest.approx(1.0)
+    # Both episodes logged to same session file
+    log_path = tmp_path / f"{session_id}.jsonl"
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    episode_starts = [e for e in events if e["event_type"] == "episode_start"]
+    assert len(episode_starts) == 2
+
+
+@pytest.mark.asyncio
+async def test_prior_conjectures_appear_in_system_prompt(mock_websocket_server, tmp_path: Path) -> None:
+    session_id = "prior-conj-session"
+    mock_websocket_server.add_session(
+        session_id,
+        ready_overrides={"budget_per_episode": 5, "synthesis_cadence": 8, "family_display_name": "Decimal"},
+    )
+    prior = [{"id": "c1", "text": "Digit mass grows with value.", "state": "open", "survival": 5}]
+
+    async def handler(connection: ServerConnection, _: str) -> None:
+        await _recv_episode_start(connection)
+        await connection.send(
+            _episode_ready(session_id, seeds=[1, 2], budget=5, prior_conjectures=prior)
+        )
+        episode_end = json.loads(await connection.recv())
+        assert episode_end["type"] == "episode_end"
+        await connection.send(
+            json.dumps(
+                {
+                    "type": "episode_complete",
+                    "total_reward": 0.0,
+                    "reward_breakdown": {},
+                    "steps": 0,
+                    "syntheses": 0,
+                    "conjectures_produced": 0,
+                    "conjectures_board_eligible": 0,
+                }
+            )
+        )
+        await connection.wait_closed()
+
+    mock_websocket_server.queue_handler(session_id, handler)
+
+    backend = ScriptedBackend(["No more conjectures to explore."])
+    orchestrator = Orchestrator(
+        backend=backend,
+        service_url=mock_websocket_server.service_url,
+        api_key=mock_websocket_server.api_key,
+        config=EpisodeConfig(local_log_dir=str(tmp_path)),
+    )
+
+    await orchestrator.run_episode(session_id, seeds=[1, 2])
+
+    system_msg = backend.calls[0][0]["content"]
+    assert "Digit mass grows with value." in system_msg
+    assert "Expand, falsify, or refine" in system_msg
+
+
 def test_parse_model_response_handles_stop_fences_and_text_tool_calls(tmp_path: Path) -> None:
     backend = ScriptedBackend([])
     orchestrator = Orchestrator(
@@ -248,3 +438,26 @@ def test_parse_model_response_handles_stop_fences_and_text_tool_calls(tmp_path: 
     assert parsed_text.tool == "mc.compare"
     assert parsed_text.args == {"lhs": "h1", "rhs": "h2"}
     assert isinstance(parsed_synthesis, Synthesis)
+
+
+def test_system_prompt_excludes_config_field(tmp_path: Path) -> None:
+    """The system prompt must never instruct the model to include a 'config' field."""
+    backend = ScriptedBackend([])
+    orchestrator = Orchestrator(
+        backend=backend,
+        service_url="ws://localhost:9090",
+        api_key="test-key",
+        config=EpisodeConfig(local_log_dir=str(tmp_path)),
+    )
+    orchestrator.family_display_name = "Zeckendorf"
+    orchestrator.family_capabilities = {"arithmetic": True, "zoom": False}
+    orchestrator.budget_per_episode = 40
+    orchestrator.server_synthesis_cadence = 8
+
+    prompt = orchestrator._build_system_prompt()
+    # Must NOT suggest including config
+    assert '"config"' not in prompt
+    # Must mention the family name
+    assert "Zeckendorf" in prompt
+    # Must have the no-config instruction
+    assert "do NOT include a 'config' field" in prompt

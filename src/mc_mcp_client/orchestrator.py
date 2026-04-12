@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -9,13 +10,16 @@ from collections import deque
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from urllib import error, request
 
 from mc_mcp_client.backends.base import LLMBackend
-from mc_mcp_client.config import EpisodeConfig
+from mc_mcp_client.config import EpisodeConfig, ServiceConfig
 from mc_mcp_client.connection import Connection
 from mc_mcp_client.protocol import (
     EpisodeComplete,
     EpisodeEnd,
+    EpisodeReady,
+    EpisodeStart,
     ServerError,
     SessionReady,
     Synthesis,
@@ -36,38 +40,103 @@ _TEXT_TOOL_CALL_PATTERN = re.compile(
 
 
 class Orchestrator:
-    """Runs one episode against the MC-MCP service."""
+    """Runs episodes against the MC-MCP service."""
 
     def __init__(
         self,
         backend: LLMBackend,
-        service_url: str,
-        api_key: str,
+        service_url: str = "",
+        api_key: str = "",
         config: EpisodeConfig | None = None,
+        service_config: ServiceConfig | None = None,
     ) -> None:
+        if service_config is not None:
+            self._service_config: ServiceConfig | None = service_config
+            self.connection = Connection(service_config.service_url, service_config.api_key)
+        else:
+            self._service_config = ServiceConfig(service_url=service_url, api_key=api_key) if service_url else None
+            self.connection = Connection(service_url, api_key)
+
         self.backend = backend
-        self.connection = Connection(service_url, api_key)
         self.config = config or EpisodeConfig()
+
+        # Session-level state (set on connect)
+        self.family_display_name: str = ""
+        self.family_capabilities: dict[str, Any] = {}
+        self.family_config: dict[str, Any] = {}
+        self.budget_per_episode: int = self.config.max_steps
+        self.server_synthesis_cadence: int = self.config.synthesis_cadence
+        self._session_id: str | None = None
+
+        # Episode-level state (set on each run_episode)
+        self._prior_conjectures: list[dict] = []
+        self._current_episode_budget: int = self.config.max_steps
+
+        # Counters / buffers
         self._tool_counter = 0
         self._synthesis_counter = 0
+        self._episode_counter = 0
         self._pending_messages: deque[Any] = deque()
+
+    async def run_session(
+        self,
+        n_episodes: int,
+        seeds_per_episode: list[list[int]] | None = None,
+    ) -> list[EpisodeComplete]:
+        """Connect once and run N episodes; histograms accumulate across episodes."""
+        await self._connect()
+        results: list[EpisodeComplete] = []
+        try:
+            for i in range(n_episodes):
+                seeds = seeds_per_episode[i] if seeds_per_episode else None
+                result = await self.run_episode(seeds=seeds)
+                results.append(result)
+                logger.info(
+                    "Episode %s/%s complete: reward=%.2f conjectures=%s",
+                    i + 1,
+                    n_episodes,
+                    result.total_reward,
+                    result.conjectures_produced,
+                )
+        finally:
+            await self.connection.close()
+        return results
 
     async def run_episode(
         self,
-        session_id: str,
+        session_id: str | None = None,
         seeds: list[int] | None = None,
     ) -> EpisodeComplete:
-        """Run a single episode and return the server's completion payload."""
+        """Run a single episode and return the server's completion payload.
+
+        If the connection is not open, connects first (and closes when done).
+        Pass ``session_id`` to connect to a specific session; omit to
+        auto-create one via HTTP (requires a ``ServiceConfig``).
+        """
+        owns_connection = not self.connection.is_connected
+        if owns_connection:
+            await self._connect(session_id)
+
         self._tool_counter = 0
         self._synthesis_counter = 0
         self._pending_messages.clear()
 
+        log_path = self._resolve_log_path()
+
+        # ── Episode start handshake ────────────────────────────────────────
         resolved_seeds = list(seeds) if seeds is not None else list(self.config.seeds or [])
-        log_path = self._resolve_log_path(session_id)
-        ready = await self._connect_session(session_id)
+        ep_start = EpisodeStart(id=self._next_episode_id(), seeds=resolved_seeds or None)
+        await self.connection.send(asdict(ep_start))
+        ep_ready = await self._wait_for_episode_ready()
+
+        self._prior_conjectures = list(ep_ready.prior_conjectures)
+        self._current_episode_budget = ep_ready.budget
+        episode_seeds = ep_ready.seeds or resolved_seeds
+
+        # ── Conversation bootstrap ─────────────────────────────────────────
         messages = [
-            {"role": "system", "content": self._build_system_prompt(ready)},
-            {"role": "user", "content": self._build_seed_prompt(resolved_seeds)},
+            {"role": "system", "content": self._build_system_prompt()},
+            {"role": "user", "content": self._build_seed_prompt(episode_seeds)},
         ]
         current_step = 0
         pending_synthesis_prompt: str | None = None
@@ -78,11 +147,14 @@ class Orchestrator:
                 "event_type": "episode_start",
                 "step": 0,
                 "tool_step": 0,
-                "budget": ready.budget,
-                "synthesis_cadence": ready.synthesis_cadence,
-                "enabled_tiers": list(ready.enabled_tiers),
+                "budget": ep_ready.budget,
+                "synthesis_cadence": self.server_synthesis_cadence,
+                "enabled_tiers": list(self.family_config.get("enabled_tiers", [])),
+                "family_display_name": self.family_display_name,
                 "curriculum_stage": self.config.stage,
-                "seed_integers": list(resolved_seeds),
+                "seed_integers": list(episode_seeds),
+                "episode_number": ep_ready.episode_number,
+                "prior_conjecture_count": len(self._prior_conjectures),
             },
         )
 
@@ -224,24 +296,121 @@ class Orchestrator:
                     return followup_complete
                 pending_synthesis_prompt = followup_prompt
         finally:
-            await self.connection.close()
+            if owns_connection:
+                await self.connection.close()
 
-    def _build_system_prompt(self, session_ready: SessionReady) -> str:
-        """Build the thin-client system prompt."""
-        enabled_tiers = self.config.enabled_tiers or session_ready.enabled_tiers
-        tiers_text = ", ".join(enabled_tiers) if enabled_tiers else "server default tiers"
-        stop_text = " | ".join(self.config.stop_phrases)
-        return (
-            "You are running a mathematical discovery episode against the MC-MCP service.\n"
-            f"Curriculum stage: {self.config.stage}\n"
-            f"Available tiers: {tiers_text}\n"
-            "Use the available mc.* tools to probe patterns before making claims.\n"
-            f"Synthesis cadence: every {session_ready.synthesis_cadence} tool calls.\n"
-            f"Tool budget: {session_ready.budget} total tool calls.\n"
-            "Good conjectures generalize beyond the examples seen, are falsifiable, and point to the next discriminating test.\n"
-            'On normal turns respond with JSON only, for example {"tool": "mc.encode", "args": {"value": 42}}.\n'
-            f"If you want to stop, say one of: {stop_text}"
+    # ── Connection management ─────────────────────────────────────────────────
+
+    async def _connect(self, session_id: str | None = None) -> SessionReady:
+        """Open the WebSocket and receive session_ready; store session-level state."""
+        if session_id is None:
+            session_id = await self._create_session_via_http()
+
+        raw = await self.connection.connect(session_id)
+        message = parse_server_message(raw)
+        if not isinstance(message, SessionReady):
+            raise TypeError(f"Expected session_ready, received {message.type!r}")
+
+        self._session_id = session_id
+        self.family_display_name = message.family_display_name
+        self.family_capabilities = dict(message.capabilities)
+        self.family_config = dict(message.family_config)
+        self.budget_per_episode = message.budget_per_episode
+        self.server_synthesis_cadence = message.synthesis_cadence
+
+        logger.info(
+            "Session %s ready: family=%r budget=%s cadence=%s",
+            session_id,
+            self.family_display_name or "(unset)",
+            self.budget_per_episode,
+            self.server_synthesis_cadence,
         )
+        return message
+
+    async def _create_session_via_http(self) -> str:
+        if self._service_config is None or not self._service_config.session_create_url:
+            raise RuntimeError(
+                "Cannot auto-create a session: no ServiceConfig with session_create_url provided. "
+                "Pass an explicit session_id to run_episode() or provide a ServiceConfig."
+            )
+        return await asyncio.to_thread(self._create_session_sync)
+
+    def _create_session_sync(self) -> str:
+        cfg = self._service_config
+        payload: dict[str, Any] = {
+            "budget": self.config.max_steps,
+            "synthesis_cadence": self.config.synthesis_cadence,
+        }
+        if self.config.enabled_tiers is not None:
+            payload["enabled_tiers"] = list(self.config.enabled_tiers)
+
+        req = request.Request(
+            cfg.session_create_url,  # type: ignore[union-attr]
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {cfg.api_key}",  # type: ignore[union-attr]
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with request.urlopen(req, timeout=10) as response:
+                raw = response.read().decode("utf-8")
+        except error.URLError as exc:
+            raise RuntimeError(f"Failed to create session at {cfg.session_create_url}: {exc}") from exc  # type: ignore[union-attr]
+
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict) or "session_id" not in parsed:
+            raise RuntimeError("Session creation response did not include a session_id.")
+        return str(parsed["session_id"])
+
+    # ── Prompt construction ───────────────────────────────────────────────────
+
+    def _build_system_prompt(self) -> str:
+        """Build the system prompt from session-level state."""
+        family_name = self.family_display_name or "mathematical"
+        caps = self.family_capabilities
+        if caps:
+            supported_ops = ", ".join(k for k, v in caps.items() if v)
+            unsupported_ops = ", ".join(k for k, v in caps.items() if not v)
+            ops_text = f"Supported operations: {supported_ops}." if supported_ops else ""
+            if unsupported_ops:
+                ops_text += f"\nNot supported: {unsupported_ops}."
+        else:
+            ops_text = "Use mc.* tools to probe the representation."
+
+        stop_text = " | ".join(self.config.stop_phrases)
+        prior_text = self._format_prior_conjectures()
+
+        return (
+            f"You are a mathematical exploration agent investigating the "
+            f"{family_name} representation family.\n\n"
+            f"{ops_text}\n\n"
+            f"Your tool budget is {self.budget_per_episode} calls per episode. "
+            f"Synthesize your findings every {self.server_synthesis_cadence} tool calls.\n\n"
+            "When calling tools, provide only semantic arguments — do NOT include a 'config' field. Examples:\n"
+            '  Encode a value:   {"tool": "mc.encode", "args": {"n": 42}}\n'
+            '  Add two handles:  {"tool": "mc.arithmetic", "args": {"op": "add", "lhs": "h_abc", "rhs": "h_def"}}\n'
+            '  Inspect a handle: {"tool": "mc.inspect", "args": {"handle": "h_abc"}}\n'
+            '  Compare handles:  {"tool": "mc.compare", "args": {"lhs": "h_abc", "rhs": "h_def"}}\n\n'
+            "Good conjectures generalize beyond the examples seen, are falsifiable, and point to the next discriminating test.\n"
+            f"To stop, say one of: {stop_text}\n"
+            f"{prior_text}"
+        )
+
+    def _format_prior_conjectures(self) -> str:
+        if not self._prior_conjectures:
+            return ""
+        lines = ["\nYour prior conjectures in this family:"]
+        for c in self._prior_conjectures:
+            state = c.get("state", "unknown")
+            text = c.get("text", "")
+            survival = c.get("survival", 0)
+            lines.append(f'- [{state}] "{text}" (survived {survival} tests)')
+        lines.append(
+            "Expand, falsify, or refine these. Restating without extension is not valuable."
+        )
+        return "\n".join(lines)
 
     def _compress_to_observation_card(self, tool: str, result: ToolResult) -> str:
         """Compress a tool result into a 4-line observation card."""
@@ -316,17 +485,22 @@ class Orchestrator:
         return Synthesis(text=stripped)
 
     def _should_stop(self, result: ToolResult | SynthesisScored) -> bool:
-        """Check whether the episode should stop."""
         if isinstance(result, ToolResult):
-            return result.budget_remaining <= 0 or result.step >= self.config.max_steps
+            return result.budget_remaining <= 0 or result.step >= self._current_episode_budget
         return False
 
-    async def _connect_session(self, session_id: str) -> SessionReady:
-        raw = await self.connection.connect(session_id)
-        message = parse_server_message(raw)
-        if not isinstance(message, SessionReady):
-            raise TypeError(f"Expected session_ready, received {message.type!r}")
-        return message
+    # ── Server message helpers ────────────────────────────────────────────────
+
+    async def _wait_for_episode_ready(self) -> EpisodeReady:
+        skipped: list[Any] = []
+        try:
+            while True:
+                message = await self._next_server_message()
+                if isinstance(message, EpisodeReady):
+                    return message
+                skipped.append(message)
+        finally:
+            self._requeue_front(skipped)
 
     async def _wait_for_tool_result(self) -> ToolResult:
         skipped: list[Any] = []
@@ -429,7 +603,8 @@ class Orchestrator:
             },
         )
 
-    def _resolve_log_path(self, session_id: str) -> Path:
+    def _resolve_log_path(self) -> Path:
+        session_id = self._session_id or "unknown_session"
         target_dir = Path(self.config.local_log_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
         return target_dir / f"{session_id}.jsonl"
@@ -530,6 +705,10 @@ class Orchestrator:
     def _next_synthesis_id(self) -> str:
         self._synthesis_counter += 1
         return f"synth_{self._synthesis_counter}"
+
+    def _next_episode_id(self) -> str:
+        self._episode_counter += 1
+        return f"ep_{self._episode_counter}"
 
     def _tool_call_text(self, tool_call: ToolCall) -> str:
         return json.dumps({"tool": tool_call.tool, "args": tool_call.args}, ensure_ascii=False)

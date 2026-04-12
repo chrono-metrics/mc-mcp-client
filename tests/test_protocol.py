@@ -7,6 +7,8 @@ import pytest
 from mc_mcp_client.protocol import (
     EpisodeComplete,
     EpisodeEnd,
+    EpisodeReady,
+    EpisodeStart,
     Pong,
     ServerError,
     SessionReady,
@@ -46,6 +48,18 @@ def test_episode_end_serialize():
         assert payload == {"type": "episode_end", "reason": reason}
 
 
+def test_episode_start_serialize():
+    msg = EpisodeStart(id="ep_1", seeds=[17, 23, 42])
+    payload = json.loads(serialize_client_message(msg))
+    assert payload == {"type": "episode_start", "id": "ep_1", "seeds": [17, 23, 42]}
+
+
+def test_episode_start_serialize_no_seeds():
+    msg = EpisodeStart(id="ep_2")
+    payload = json.loads(serialize_client_message(msg))
+    assert payload == {"type": "episode_start", "id": "ep_2", "seeds": None}
+
+
 def test_pong_serialize():
     payload = json.loads(serialize_client_message(Pong()))
     assert payload == {"type": "pong"}
@@ -59,19 +73,54 @@ def test_parse_session_ready():
         "type": "session_ready",
         "session_id": "abc123",
         "enabled_tiers": ["E0", "E1", "E2"],
-        "budget": 40,
+        "budget_per_episode": 40,
         "synthesis_cadence": 8,
         "tool_count": 14,
+        "family_display_name": "Zeckendorf",
+        "family_config": {"ladder_mode": "standard"},
+        "capabilities": {"arithmetic": True, "zoom": False},
         "step": 0,
     }
     msg = parse_server_message(raw)
     assert isinstance(msg, SessionReady)
     assert msg.session_id == "abc123"
     assert msg.enabled_tiers == ["E0", "E1", "E2"]
-    assert msg.budget == 40
+    assert msg.budget_per_episode == 40
     assert msg.synthesis_cadence == 8
     assert msg.tool_count == 14
+    assert msg.family_display_name == "Zeckendorf"
+    assert msg.family_config == {"ladder_mode": "standard"}
+    assert msg.capabilities == {"arithmetic": True, "zoom": False}
     assert msg.step == 0
+
+
+def test_parse_episode_ready():
+    raw = {
+        "type": "episode_ready",
+        "id": "ep_1",
+        "episode_id": "epid_abc",
+        "episode_number": 1,
+        "seeds": [17, 23, 42],
+        "budget": 40,
+        "prior_conjectures": [{"id": "c1", "text": "Foo", "state": "open", "survival": 3}],
+    }
+    msg = parse_server_message(raw)
+    assert isinstance(msg, EpisodeReady)
+    assert msg.id == "ep_1"
+    assert msg.episode_id == "epid_abc"
+    assert msg.episode_number == 1
+    assert msg.seeds == [17, 23, 42]
+    assert msg.budget == 40
+    assert len(msg.prior_conjectures) == 1
+    assert msg.prior_conjectures[0]["text"] == "Foo"
+
+
+def test_episode_ready_defaults():
+    msg = EpisodeReady()
+    assert msg.budget == 40
+    assert msg.seeds == []
+    assert msg.prior_conjectures == []
+    assert msg.episode_number == 0
 
 
 def test_parse_tool_result():
@@ -283,10 +332,13 @@ def test_extra_fields_ignored():
 
 def test_session_ready_defaults():
     msg = SessionReady(session_id="x")
-    assert msg.budget == 40
+    assert msg.budget_per_episode == 40
     assert msg.synthesis_cadence == 8
     assert msg.tool_count == 12
     assert msg.enabled_tiers == []
+    assert msg.family_display_name == ""
+    assert msg.family_config == {}
+    assert msg.capabilities == {}
     assert msg.step == 0
 
 

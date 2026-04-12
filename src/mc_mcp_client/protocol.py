@@ -28,6 +28,13 @@ class EpisodeEnd:
 
 
 @dataclass
+class EpisodeStart:
+    type: str = "episode_start"
+    id: str = ""
+    seeds: list[int] | None = None
+
+
+@dataclass
 class Pong:
     type: str = "pong"
 
@@ -40,10 +47,24 @@ class SessionReady:
     type: str = "session_ready"
     session_id: str = ""
     enabled_tiers: list[str] = field(default_factory=list)
-    budget: int = 40
+    budget_per_episode: int = 40
     synthesis_cadence: int = 8
     tool_count: int = 12
+    family_config: dict = field(default_factory=dict)
+    family_display_name: str = ""
+    capabilities: dict = field(default_factory=dict)
     step: int = 0           # always 0 on connect; included for completeness
+
+
+@dataclass
+class EpisodeReady:
+    type: str = "episode_ready"
+    id: str = ""
+    episode_id: str = ""
+    episode_number: int = 0
+    seeds: list[int] = field(default_factory=list)
+    budget: int = 40
+    prior_conjectures: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -102,6 +123,7 @@ class ServerError:
 
 _SERVER_TYPE_MAP: dict[str, type] = {
     "session_ready": SessionReady,
+    "episode_ready": EpisodeReady,
     "tool_result": ToolResult,
     "synthesis_required": SynthesisRequired,
     "synthesis_scored": SynthesisScored,
@@ -111,6 +133,7 @@ _SERVER_TYPE_MAP: dict[str, type] = {
 
 ServerMessage = (
     SessionReady
+    | EpisodeReady
     | ToolResult
     | SynthesisRequired
     | SynthesisScored
@@ -118,7 +141,7 @@ ServerMessage = (
     | ServerError
 )
 
-ClientMessage = ToolCall | Synthesis | EpisodeEnd | Pong
+ClientMessage = ToolCall | Synthesis | EpisodeEnd | EpisodeStart | Pong
 
 
 def parse_server_message(raw: dict[str, Any]) -> ServerMessage:
