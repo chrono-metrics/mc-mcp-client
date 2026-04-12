@@ -16,6 +16,19 @@ mathematical reasoning gym.
    `python examples/quickstart.py`
 5. See your episode log in `./episodes/`
 
+The beginner-facing runtime API is synchronous:
+
+```python
+result = orch.run_episode(seeds=[17, 23, 42])
+```
+
+If you are already inside asyncio code, use the async variants instead:
+
+```python
+result = await orch.run_episode_async(seeds=[17, 23, 42])
+results = await orch.run_session_async(n_episodes=3, seeds_per_episode=[[17, 23], [42, 55], [89, 144]])
+```
+
 ## Examples
 
 - `examples/quickstart.py` — minimal single episode

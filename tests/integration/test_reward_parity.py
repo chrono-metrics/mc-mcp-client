@@ -81,7 +81,7 @@ async def run_service_episode(
             synthesis_cadence=_PARITY_CADENCE,
         ),
     )
-    return await orch.run_episode(session_id=session_id, seeds=_PARITY_SEEDS)
+    return await orch.run_episode_async(session_id=session_id, seeds=_PARITY_SEEDS)
 
 
 def run_monolith_episode(monolith_path: Path, tmp_path: Path) -> dict:
@@ -212,7 +212,7 @@ async def test_reward_breakdown_contains_expected_terms(
             synthesis_cadence=_PARITY_CADENCE,
         ),
     )
-    result = await orch.run_episode(session_id=session_id, seeds=_PARITY_SEEDS)
+    result = await orch.run_episode_async(session_id=session_id, seeds=_PARITY_SEEDS)
 
     expected_terms = {
         "reward_base",

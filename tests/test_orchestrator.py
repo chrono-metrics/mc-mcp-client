@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from collections import deque
 from pathlib import Path
@@ -10,7 +11,7 @@ from websockets.server import ServerConnection
 from mc_mcp_client.backends.base import LLMBackend
 from mc_mcp_client.config import DEFAULT_SERVICE_URL, EpisodeConfig, SessionConfig
 from mc_mcp_client.orchestrator import Orchestrator
-from mc_mcp_client.protocol import EpisodeEnd, Synthesis, ToolCall
+from mc_mcp_client.protocol import EpisodeComplete, EpisodeEnd, Synthesis, ToolCall
 
 
 class ScriptedBackend(LLMBackend):
@@ -170,7 +171,7 @@ async def test_run_episode_handles_tool_synthesis_and_stop(mock_websocket_server
         config=EpisodeConfig(local_log_dir=str(tmp_path), synthesis_cadence=1, max_steps=2),
     )
 
-    result = await orchestrator.run_episode(session_id, seeds=[5, 8, 13])
+    result = await orchestrator.run_episode_async(session_id, seeds=[5, 8, 13])
 
     assert result.total_reward == pytest.approx(1.25)
     assert result.steps == 1
@@ -271,7 +272,7 @@ async def test_run_episode_retries_once_after_parse_failure(mock_websocket_serve
         config=EpisodeConfig(local_log_dir=str(tmp_path)),
     )
 
-    result = await orchestrator.run_episode(session_id)
+    result = await orchestrator.run_episode_async(session_id)
 
     assert result.steps == 1
     assert received_messages[0]["tool"] == "mc.inspect"
@@ -360,7 +361,7 @@ async def test_run_session_runs_multiple_episodes(mock_websocket_server, tmp_pat
     await orchestrator._connect(session_id)
     results = []
     for ep, seeds in enumerate([[17, 23], [42, 55]], start=1):
-        result = await orchestrator.run_episode(seeds=seeds)
+        result = await orchestrator.run_episode_async(seeds=seeds)
         results.append(result)
     await orchestrator.connection.close()
 
@@ -415,7 +416,7 @@ async def test_prior_conjectures_appear_in_system_prompt(mock_websocket_server, 
         config=EpisodeConfig(local_log_dir=str(tmp_path)),
     )
 
-    await orchestrator.run_episode(session_id, seeds=[1, 2])
+    await orchestrator.run_episode_async(session_id, seeds=[1, 2])
 
     system_msg = backend.calls[0][0]["content"]
     assert "Digit mass grows with value." in system_msg
@@ -487,6 +488,39 @@ def test_orchestrator_defaults_to_hosted_service_without_manual_service_config(t
     assert orchestrator.connection.service_url == DEFAULT_SERVICE_URL
     assert orchestrator.connection.api_key == "hosted-key"
     assert orchestrator.session_config.enabled_tiers == ["E0", "E1", "E2"]
+
+
+def test_run_episode_sync_is_beginner_entrypoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    orchestrator = Orchestrator(
+        backend=ScriptedBackend([]),
+        episode_config=EpisodeConfig(local_log_dir=str(tmp_path)),
+    )
+    sentinel = EpisodeComplete(total_reward=1.0)
+    captured: dict[str, object] = {}
+
+    def _fake_run_sync(coro_factory):
+        coro = coro_factory()
+        captured["is_coro"] = inspect.iscoroutine(coro)
+        coro.close()
+        return sentinel
+
+    monkeypatch.setattr(orchestrator, "_run_sync", _fake_run_sync)
+
+    result = orchestrator.run_episode(seeds=[17, 23, 42])
+
+    assert result is sentinel
+    assert captured["is_coro"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_episode_sync_rejects_active_event_loop(tmp_path: Path) -> None:
+    orchestrator = Orchestrator(
+        backend=ScriptedBackend([]),
+        episode_config=EpisodeConfig(local_log_dir=str(tmp_path)),
+    )
+
+    with pytest.raises(RuntimeError, match="run_episode_async"):
+        orchestrator.run_episode(seeds=[17, 23, 42])
 
 
 def test_build_session_create_payload_uses_public_session_contract(tmp_path: Path) -> None:

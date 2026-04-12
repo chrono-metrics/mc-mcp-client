@@ -1,4 +1,4 @@
-"""Thin async episode orchestrator."""
+"""Thin episode orchestrator with sync and async entrypoints."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from collections import deque
 from dataclasses import asdict
 from pathlib import Path
@@ -45,7 +46,12 @@ _TEXT_TOOL_CALL_PATTERN = re.compile(
 
 
 class Orchestrator:
-    """Runs episodes against the MC-MCP service."""
+    """Runs episodes against the MC-MCP service.
+
+    `run_episode()` and `run_session()` are synchronous convenience entrypoints
+    for scripts and quickstarts. Use `run_episode_async()` and
+    `run_session_async()` when integrating into an existing event loop.
+    """
 
     def __init__(
         self,
@@ -85,7 +91,7 @@ class Orchestrator:
         self.server_synthesis_cadence: int = self.session_config.synthesis_cadence
         self._session_id: str | None = None
 
-        # Episode-level state (set on each run_episode)
+        # Episode-level state (set on each run_episode_async)
         self._prior_conjectures: list[dict] = []
         self._current_episode_budget: int = self.config.max_steps
 
@@ -95,7 +101,25 @@ class Orchestrator:
         self._episode_counter = 0
         self._pending_messages: deque[Any] = deque()
 
-    async def run_session(
+    def run_session(
+        self,
+        n_episodes: int,
+        seeds_per_episode: list[list[int]] | None = None,
+    ) -> list[EpisodeComplete]:
+        """Run multiple episodes synchronously.
+
+        This is the beginner-facing public entrypoint for script-style use.
+        Use `await run_session_async(...)` inside existing asyncio code.
+        """
+
+        return self._run_sync(
+            lambda: self.run_session_async(
+                n_episodes=n_episodes,
+                seeds_per_episode=seeds_per_episode,
+            )
+        )
+
+    async def run_session_async(
         self,
         n_episodes: int,
         seeds_per_episode: list[list[int]] | None = None,
@@ -106,7 +130,7 @@ class Orchestrator:
         try:
             for i in range(n_episodes):
                 seeds = seeds_per_episode[i] if seeds_per_episode else None
-                result = await self.run_episode(seeds=seeds)
+                result = await self.run_episode_async(seeds=seeds)
                 results.append(result)
                 logger.info(
                     "Episode %s/%s complete: reward=%.2f conjectures=%s",
@@ -119,7 +143,25 @@ class Orchestrator:
             await self.connection.close()
         return results
 
-    async def run_episode(
+    def run_episode(
+        self,
+        session_id: str | None = None,
+        seeds: list[int] | None = None,
+    ) -> EpisodeComplete:
+        """Run a single episode synchronously.
+
+        This is the beginner-facing public entrypoint for script-style use.
+        Use `await run_episode_async(...)` inside existing asyncio code.
+        """
+
+        return self._run_sync(
+            lambda: self.run_episode_async(
+                session_id=session_id,
+                seeds=seeds,
+            )
+        )
+
+    async def run_episode_async(
         self,
         session_id: str | None = None,
         seeds: list[int] | None = None,
@@ -128,7 +170,7 @@ class Orchestrator:
 
         If the connection is not open, connects first (and closes when done).
         Pass ``session_id`` to connect to a specific session; omit to
-        auto-create one via HTTP (requires a ``ServiceConfig``).
+        auto-create one via the configured public session-create endpoint.
         """
         owns_connection = not self.connection.is_connected
         if owns_connection:
@@ -378,6 +420,20 @@ class Orchestrator:
         if not isinstance(parsed, dict) or "session_id" not in parsed:
             raise RuntimeError("Session creation response did not include a session_id.")
         return str(parsed["session_id"])
+
+    @staticmethod
+    def _run_sync(coro_factory: Callable[[], Awaitable[Any]]) -> Any:
+        """Run a coroutine from sync code and reject nested event-loop use."""
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro_factory())
+
+        raise RuntimeError(
+            "run_episode() and run_session() cannot be called from an active event loop. "
+            "Use await run_episode_async(...) or await run_session_async(...) instead."
+        )
 
     @staticmethod
     def _coerce_session_config(

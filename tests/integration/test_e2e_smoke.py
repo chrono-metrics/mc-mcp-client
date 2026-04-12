@@ -116,7 +116,7 @@ async def test_single_episode_completes_with_reward(service_url, api_key, family
         ),
     )
 
-    result = await orch.run_episode(session_id=session_id, seeds=[17, 23, 42])
+    result = await orch.run_episode_async(session_id=session_id, seeds=[17, 23, 42])
 
     assert isinstance(result, EpisodeComplete)
     assert math.isfinite(result.total_reward), f"total_reward is not finite: {result.total_reward}"
@@ -149,7 +149,7 @@ async def test_tool_result_has_valid_handle(service_url, api_key, family_config,
         api_key=api_key,
         config=EpisodeConfig(local_log_dir=str(tmp_path), max_steps=5, synthesis_cadence=10),
     )
-    await orch.run_episode(session_id=session_id)
+    await orch.run_episode_async(session_id=session_id)
 
     log_files = list(tmp_path.glob("*.jsonl"))
     assert log_files
@@ -206,7 +206,7 @@ async def test_multi_episode_session(service_url, api_key, family_config, tmp_pa
     for seeds in seeds_per_episode:
         # Swap in a fresh scripted backend for each episode
         orch.backend = make_backend()
-        result = await orch.run_episode(seeds=seeds)
+        result = await orch.run_episode_async(seeds=seeds)
         results.append(result)
     await orch.connection.close()
 
@@ -281,13 +281,13 @@ async def test_handle_from_episode1_invalid_in_episode2(service_url, api_key, fa
         config=EpisodeConfig(local_log_dir=str(tmp_path), max_steps=10, synthesis_cadence=8),
     )
     await orch._connect(session_id)
-    await orch.run_episode(seeds=[17])
+    await orch.run_episode_async(seeds=[17])
 
     if not captured_handle:
         pytest.skip("Episode 1 did not capture a handle — skipping cross-episode test")
 
     orch.backend = ScriptedBackend([ep2_respond] * 20)
-    await orch.run_episode(seeds=[23])
+    await orch.run_episode_async(seeds=[23])
     await orch.connection.close()
 
     log_files = list(tmp_path.glob("*.jsonl"))
@@ -334,7 +334,7 @@ async def test_tool_calls_contain_no_config_field(service_url, api_key, family_c
         api_key=api_key,
         config=EpisodeConfig(local_log_dir=str(tmp_path), max_steps=8, synthesis_cadence=4),
     )
-    await orch.run_episode(session_id=session_id, seeds=[17, 23])
+    await orch.run_episode_async(session_id=session_id, seeds=[17, 23])
 
     log_files = list(tmp_path.glob("*.jsonl"))
     assert log_files
@@ -379,7 +379,7 @@ async def test_system_prompt_instructs_no_config(service_url, api_key, family_co
         api_key=api_key,
         config=EpisodeConfig(local_log_dir=str(tmp_path), max_steps=5, synthesis_cadence=10),
     )
-    await orch.run_episode(session_id=session_id)
+    await orch.run_episode_async(session_id=session_id)
 
     assert captured_prompts, "Backend was never called"
     system_content = captured_prompts[0][0]["content"]
@@ -432,7 +432,7 @@ async def test_full_episode_with_qwen3(service_url, api_key, family_config, mode
         api_key=api_key,
         config=EpisodeConfig(local_log_dir=str(tmp_path), max_steps=20, synthesis_cadence=8),
     )
-    result = await orch.run_episode(session_id=session_id, seeds=[17, 23, 42])
+    result = await orch.run_episode_async(session_id=session_id, seeds=[17, 23, 42])
 
     assert math.isfinite(result.total_reward)
     assert result.steps > 0, "Model made no tool calls"
