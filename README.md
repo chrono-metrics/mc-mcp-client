@@ -12,15 +12,22 @@ pip install mc-mcp-client
 ## Quickstart
 
 ```python
+import asyncio
+
 from mc_mcp_client import Orchestrator, VLLMBackend
 
-orch = Orchestrator(
-    backend=VLLMBackend(model="qwen3-8b", base_url="http://localhost:8080/v1"),
-    service_url="ws://localhost:9090",
-    api_key="mcmcp_dev_key",
-)
-result = orch.run_episode(seeds=[17, 23, 42], stage=2)
-print(f"Reward: {result.total_reward}")
+
+async def main() -> None:
+    orch = Orchestrator(
+        backend=VLLMBackend(model="qwen3-8b", base_url="http://localhost:8080/v1"),
+        service_url="ws://localhost:9090",
+        api_key="mcmcp_dev_key",
+    )
+    result = await orch.run_episode(session_id="my-session-id", seeds=[17, 23, 42])
+    print(f"Reward: {result.total_reward}")
+
+
+asyncio.run(main())
 ```
 
 ## Examples
