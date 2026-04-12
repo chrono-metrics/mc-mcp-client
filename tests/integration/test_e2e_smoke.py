@@ -13,13 +13,15 @@ Or via gcloud proxy (recommended for Cloud Run):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from pathlib import Path
 
 import pytest
 
-from mc_mcp_client.config import EpisodeConfig
+from mc_mcp_client import VLLMBackend
+from mc_mcp_client.config import EpisodeConfig, SessionConfig
 from mc_mcp_client.connection import Connection
 from mc_mcp_client.orchestrator import Orchestrator
 from mc_mcp_client.protocol import (
@@ -82,6 +84,69 @@ async def test_websocket_session_ready_contains_family_info(service_url, api_key
     assert msg.family_display_name, "family_display_name is empty"
     assert isinstance(msg.capabilities, dict)
     assert msg.budget_per_episode > 0
+
+
+@pytest.mark.requires_model
+def test_public_bootstrap_contract_auto_creates_and_runs_episode(
+    service_url,
+    api_key,
+    model_url,
+    tmp_path: Path,
+) -> None:
+    """Contract-level smoke test for the beginner thin-client flow.
+
+    This test uses only the public thin-client surface:
+    - backend model URL
+    - API key
+    - high-level session config
+    - seeds passed directly to `run_episode(...)`
+
+    It does not provide `family_config` and does not manually create a session.
+    """
+
+    session = SessionConfig(
+        enabled_tiers=["E0", "E1", "E2"],
+        budget=10,
+        synthesis_cadence=4,
+    )
+    backend = VLLMBackend(model="qwen3-8b", url=model_url)
+    orch = Orchestrator(
+        backend=backend,
+        api_key=api_key,
+        service_url=service_url,  # optional override for the live test environment
+        session_config=session,
+        episode_config=EpisodeConfig(
+            local_log_dir=str(tmp_path),
+            max_steps=99,
+            synthesis_cadence=77,
+        ),
+    )
+
+    try:
+        result = orch.run_episode(seeds=[17, 23, 42])
+    finally:
+        if backend._client is not None:
+            asyncio.run(backend._client.close())
+
+    assert isinstance(result, EpisodeComplete)
+    assert math.isfinite(result.total_reward)
+    assert result.reward_breakdown
+    assert orch._session_id, "Orchestrator did not auto-create a session"
+    assert orch.enabled_tiers == session.enabled_tiers
+    assert orch.budget_per_episode == session.budget
+    assert orch.server_synthesis_cadence == session.synthesis_cadence
+    assert orch.family_display_name, "Bootstrap family_display_name is empty"
+    assert orch.family_capabilities, "Bootstrap capabilities are empty"
+    assert orch.family_config, "Bootstrap family_config is empty"
+    assert orch.family_config.get("mode") == "zeckendorf"
+
+    log_path = tmp_path / f"{orch._session_id}.jsonl"
+    assert log_path.exists(), f"Expected episode log at {log_path}"
+    events = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+    episode_start = next(event for event in events if event["event_type"] == "episode_start")
+    assert episode_start["enabled_tiers"] == session.enabled_tiers
+    assert episode_start["synthesis_cadence"] == session.synthesis_cadence
+    assert episode_start["family_display_name"] == orch.family_display_name
 
 
 @pytest.mark.asyncio

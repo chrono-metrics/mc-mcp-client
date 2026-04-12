@@ -10,11 +10,13 @@ MC_MCP_SERVICE_URL   WebSocket URL of the live service.
 
 MC_MCP_API_KEY       Bearer token.  Defaults to "mcmcp_dev".
 
-MC_MCP_FAMILY_CONFIG JSON-encoded family config dict.
+MC_MCP_FAMILY_CONFIG JSON-encoded family config dict for legacy/manual-bootstrap
+                     tests that still exercise the explicit override path.
                      Defaults to Zeckendorf: {"mode": "zeckendorf", "depth": 20}
 
-MC_MCP_MODEL_URL     OpenAI-compatible model base URL.
-                     Defaults to http://localhost:8080/v1
+MC_MCP_MODEL_URL     OpenAI-compatible model URL.
+                     Example: http://localhost:8080
+                     `/v1` is optional; the public VLLMBackend normalizes it.
                      (omit to skip tests that require a real model)
 
 Quick start (local)
