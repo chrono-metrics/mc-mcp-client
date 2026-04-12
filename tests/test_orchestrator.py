@@ -8,7 +8,7 @@ import pytest
 from websockets.server import ServerConnection
 
 from mc_mcp_client.backends.base import LLMBackend
-from mc_mcp_client.config import DEFAULT_SERVICE_URL, EpisodeConfig
+from mc_mcp_client.config import DEFAULT_SERVICE_URL, EpisodeConfig, SessionConfig
 from mc_mcp_client.orchestrator import Orchestrator
 from mc_mcp_client.protocol import EpisodeEnd, Synthesis, ToolCall
 
@@ -489,7 +489,27 @@ def test_orchestrator_defaults_to_hosted_service_without_manual_service_config(t
     assert orchestrator.session_config.enabled_tiers == ["E0", "E1", "E2"]
 
 
-def test_create_session_sync_uses_session_config_enabled_tiers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_build_session_create_payload_uses_public_session_contract(tmp_path: Path) -> None:
+    orchestrator = Orchestrator(
+        backend=ScriptedBackend([]),
+        session_config=SessionConfig(
+            session_id="sess_123",
+            enabled_tiers=["E0", "E3"],
+            budget=12,
+            synthesis_cadence=5,
+        ),
+        episode_config=EpisodeConfig(local_log_dir=str(tmp_path), max_steps=99, synthesis_cadence=77),
+    )
+
+    assert orchestrator._build_session_create_payload() == {
+        "session_id": "sess_123",
+        "enabled_tiers": ["E0", "E3"],
+        "budget": 12,
+        "synthesis_cadence": 5,
+    }
+
+
+def test_create_session_sync_uses_session_config_payload(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     class _Response:
@@ -515,8 +535,12 @@ def test_create_session_sync_uses_session_config_enabled_tiers(monkeypatch: pyte
         backend=ScriptedBackend([]),
         api_key="svc-key",
         service_url="ws://example.test:9090",
-        episode_config=EpisodeConfig(local_log_dir=str(tmp_path), max_steps=12, synthesis_cadence=5),
-        session_config={"enabled_tiers": ["E0", "E1", "E2"]},
+        episode_config=EpisodeConfig(local_log_dir=str(tmp_path), max_steps=99, synthesis_cadence=77),
+        session_config=SessionConfig(
+            enabled_tiers=["E0", "E1", "E2"],
+            budget=12,
+            synthesis_cadence=5,
+        ),
     )
 
     session_id = orchestrator._create_session_sync()
@@ -528,6 +552,39 @@ def test_create_session_sync_uses_session_config_enabled_tiers(monkeypatch: pyte
         "synthesis_cadence": 5,
         "enabled_tiers": ["E0", "E1", "E2"],
     }
+
+
+def test_create_session_sync_omits_family_config_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class _Response:
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+
+        def read(self) -> bytes:
+            return b'{"session_id": "sess_123"}'
+
+    def _fake_urlopen(req, timeout: int = 10):
+        del timeout
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _Response()
+
+    monkeypatch.setattr("mc_mcp_client.orchestrator.request.urlopen", _fake_urlopen)
+
+    orchestrator = Orchestrator(
+        backend=ScriptedBackend([]),
+        api_key="svc-key",
+        service_url="ws://example.test:9090",
+        episode_config=EpisodeConfig(local_log_dir=str(tmp_path)),
+        session_config=SessionConfig(),
+    )
+
+    orchestrator._create_session_sync()
+
+    assert "family_config" not in captured["body"]
 
 
 def test_orchestrator_rejects_duplicate_episode_config_aliases(tmp_path: Path) -> None:

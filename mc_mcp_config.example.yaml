@@ -2,6 +2,11 @@ service:
   service_url: "wss://api.mc-mcp.com"
   api_key: "${MC_MCP_API_KEY}"
 
+session:
+  enabled_tiers: ["E0", "E1", "E2"]
+  budget: 40
+  synthesis_cadence: 8
+
 model:
   backend: "vllm"
   model: "qwen3-8b"
@@ -10,9 +15,7 @@ model:
 
 episode:
   stage: 2
-  enabled_tiers: ["E0", "E1", "E2"]
   max_steps: 40
-  synthesis_cadence: 8
   temperature: 0.7
   max_tokens: 512
   local_log_dir: "./episodes"

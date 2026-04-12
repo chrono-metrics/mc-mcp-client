@@ -77,12 +77,12 @@ class Orchestrator:
         self.session_config = self._coerce_session_config(session_config)
 
         # Session-level state (set on connect)
-        self.enabled_tiers: list[str] = list(self.session_config.enabled_tiers or [])
+        self.enabled_tiers: list[str] = list(self.session_config.enabled_tiers)
         self.family_display_name: str = ""
         self.family_capabilities: dict[str, Any] = {}
         self.family_config: dict[str, Any] = {}
-        self.budget_per_episode: int = self.config.max_steps
-        self.server_synthesis_cadence: int = self.config.synthesis_cadence
+        self.budget_per_episode: int = self.session_config.budget
+        self.server_synthesis_cadence: int = self.session_config.synthesis_cadence
         self._session_id: str | None = None
 
         # Episode-level state (set on each run_episode)
@@ -350,14 +350,14 @@ class Orchestrator:
             raise RuntimeError("Cannot auto-create a session: service config is missing session_create_url.")
         return await asyncio.to_thread(self._create_session_sync)
 
+    def _build_session_create_payload(self) -> dict[str, Any]:
+        """Build the public thin-client session-create payload."""
+
+        return self.session_config.to_create_payload()
+
     def _create_session_sync(self) -> str:
         cfg = self._service_config
-        payload: dict[str, Any] = {
-            "budget": self.config.max_steps,
-            "synthesis_cadence": self.config.synthesis_cadence,
-        }
-        if self.session_config.enabled_tiers is not None:
-            payload["enabled_tiers"] = list(self.session_config.enabled_tiers)
+        payload = self._build_session_create_payload()
 
         req = request.Request(
             cfg.session_create_url,

@@ -6,7 +6,10 @@ import pytest
 
 from mc_mcp_client.config import (
     ClientConfig,
+    DEFAULT_ENABLED_TIERS,
     DEFAULT_SERVICE_URL,
+    DEFAULT_SESSION_BUDGET,
+    DEFAULT_SESSION_SYNTHESIS_CADENCE,
     EpisodeConfig,
     ModelConfig,
     ServiceConfig,
@@ -27,6 +30,34 @@ def test_service_config_defaults_to_hosted_service() -> None:
 
     assert config.service_url == DEFAULT_SERVICE_URL
     assert config.session_create_url == "https://api.mc-mcp.com/v1/sessions"
+
+
+def test_session_config_builds_public_create_payload_defaults() -> None:
+    session = SessionConfig()
+
+    assert session.to_create_payload() == {
+        "enabled_tiers": list(DEFAULT_ENABLED_TIERS),
+        "budget": DEFAULT_SESSION_BUDGET,
+        "synthesis_cadence": DEFAULT_SESSION_SYNTHESIS_CADENCE,
+    }
+
+
+def test_session_config_builds_public_create_payload_with_explicit_override() -> None:
+    session = SessionConfig(
+        session_id="sess_123",
+        enabled_tiers=["E0", "E3"],
+        budget=12,
+        synthesis_cadence=5,
+        family_config={"mode": "negabase", "base": 2},
+    )
+
+    assert session.to_create_payload() == {
+        "session_id": "sess_123",
+        "enabled_tiers": ["E0", "E3"],
+        "budget": 12,
+        "synthesis_cadence": 5,
+        "family_config": {"mode": "negabase", "base": 2},
+    }
 
 
 def test_load_config_returns_defaults_when_file_is_missing(tmp_path: Path) -> None:
@@ -58,11 +89,12 @@ model:
   base_url: "http://localhost:8080/v1"
 session:
   enabled_tiers: ["E0", "E1", "E2"]
+  budget: 60
+  synthesis_cadence: 10
 episode:
   stage: 3
   seeds: [11, 13]
   max_steps: 60
-  synthesis_cadence: 10
   temperature: 0.2
   max_tokens: 1024
   local_log_dir: "./tmp-episodes"
@@ -73,10 +105,12 @@ episode:
     session, episode, service, model = load_config(str(config_path))
 
     assert session.enabled_tiers == ["E0", "E1", "E2"]
+    assert session.budget == 60
+    assert session.synthesis_cadence == 10
     assert episode.stage == 3
     assert episode.seeds == [11, 13]
     assert episode.max_steps == 60
-    assert episode.synthesis_cadence == 10
+    assert episode.synthesis_cadence == EpisodeConfig().synthesis_cadence
     assert episode.temperature == 0.2
     assert episode.max_tokens == 1024
     assert episode.local_log_dir == "./tmp-episodes"
@@ -123,6 +157,8 @@ def test_load_config_promotes_legacy_episode_enabled_tiers_to_session(tmp_path: 
         """
 episode:
   enabled_tiers: ["E0", "E1"]
+  max_steps: 12
+  synthesis_cadence: 6
   stage: 1
 """,
         encoding="utf-8",
@@ -131,7 +167,9 @@ episode:
     session, episode, service, model = load_config(str(config_path))
 
     assert session.enabled_tiers == ["E0", "E1"]
-    assert episode == EpisodeConfig(stage=1)
+    assert session.budget == 12
+    assert session.synthesis_cadence == 6
+    assert episode == EpisodeConfig(stage=1, max_steps=12, synthesis_cadence=6)
     assert service == ServiceConfig()
     assert model == ModelConfig()
 

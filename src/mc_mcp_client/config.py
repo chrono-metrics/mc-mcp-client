@@ -12,13 +12,34 @@ import yaml
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 DEFAULT_SERVICE_URL = "wss://api.mc-mcp.com"
+DEFAULT_ENABLED_TIERS = ["E0", "E1", "E2"]
+DEFAULT_SESSION_BUDGET = 40
+DEFAULT_SESSION_SYNTHESIS_CADENCE = 8
 
 
 @dataclass
 class SessionConfig:
-    """Configuration for session bootstrap with the curriculum service."""
+    """Public session-bootstrap configuration for the curriculum service."""
 
-    enabled_tiers: list[str] | None = None
+    session_id: str | None = None
+    enabled_tiers: list[str] = field(default_factory=lambda: list(DEFAULT_ENABLED_TIERS))
+    budget: int = DEFAULT_SESSION_BUDGET
+    synthesis_cadence: int = DEFAULT_SESSION_SYNTHESIS_CADENCE
+    family_config: dict[str, Any] | None = None
+
+    def to_create_payload(self) -> dict[str, Any]:
+        """Build the public `POST /v1/sessions` payload for thin-client bootstrap."""
+
+        payload: dict[str, Any] = {
+            "enabled_tiers": list(self.enabled_tiers),
+            "budget": self.budget,
+            "synthesis_cadence": self.synthesis_cadence,
+        }
+        if self.session_id is not None:
+            payload["session_id"] = self.session_id
+        if self.family_config is not None:
+            payload["family_config"] = dict(self.family_config)
+        return payload
 
 
 @dataclass
@@ -96,6 +117,14 @@ def load_client_config(path: str = "mc_mcp_config.yaml") -> ClientConfig:
         and "enabled_tiers" in episode_section
     ):
         session_data["enabled_tiers"] = episode_section["enabled_tiers"]
+    if "budget" not in session_data and isinstance(episode_section, dict) and "max_steps" in episode_section:
+        session_data["budget"] = episode_section["max_steps"]
+    if (
+        "synthesis_cadence" not in session_data
+        and isinstance(episode_section, dict)
+        and "synthesis_cadence" in episode_section
+    ):
+        session_data["synthesis_cadence"] = episode_section["synthesis_cadence"]
 
     api_key = os.getenv("MC_MCP_API_KEY")
     service_url = os.getenv("MC_MCP_SERVICE_URL")
@@ -163,7 +192,10 @@ def _section_kwargs(cls: type[Any], section: Any) -> dict[str, Any]:
 
 __all__ = [
     "ClientConfig",
+    "DEFAULT_ENABLED_TIERS",
     "DEFAULT_SERVICE_URL",
+    "DEFAULT_SESSION_BUDGET",
+    "DEFAULT_SESSION_SYNTHESIS_CADENCE",
     "SessionConfig",
     "EpisodeConfig",
     "ServiceConfig",
