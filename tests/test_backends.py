@@ -84,9 +84,13 @@ class MockOpenAIServer:
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
     @property
-    def base_url(self) -> str:
+    def url(self) -> str:
         host, port = self._server.server_address
-        return f"http://{host}:{port}/v1"
+        return f"http://{host}:{port}"
+
+    @property
+    def base_url(self) -> str:
+        return f"{self.url}/v1"
 
     def start(self) -> None:
         self._thread.start()
@@ -161,6 +165,29 @@ async def test_generate_returns_response_text(mock_openai_server) -> None:
         "temperature": 0.2,
         "stop": ["Observation:"],
     }
+
+
+def test_vllm_backend_normalizes_public_url_to_v1(mock_openai_server) -> None:
+    backend = VLLMBackend(model="qwen3-8b", url=mock_openai_server.url)
+
+    assert backend.url == mock_openai_server.url
+    assert backend.base_url == mock_openai_server.base_url
+
+
+def test_vllm_backend_accepts_base_url_alias(mock_openai_server) -> None:
+    backend = VLLMBackend(model="qwen3-8b", base_url=mock_openai_server.base_url)
+
+    assert backend.url == mock_openai_server.url
+    assert backend.base_url == mock_openai_server.base_url
+
+
+def test_vllm_backend_rejects_url_and_base_url_together() -> None:
+    with pytest.raises(ValueError, match="either url or base_url"):
+        VLLMBackend(
+            model="qwen3-8b",
+            url="http://example.test:8080",
+            base_url="http://localhost:8080/v1",
+        )
 
 
 @pytest.mark.asyncio

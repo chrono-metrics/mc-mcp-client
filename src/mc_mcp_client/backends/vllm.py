@@ -10,17 +10,29 @@ from mc_mcp_client.backends.base import LLMBackend
 
 
 class VLLMBackend(LLMBackend):
-    """OpenAI-compatible backend (works with vLLM, TGI, Ollama, etc.)."""
+    """OpenAI-compatible backend (works with vLLM, TGI, Ollama, etc.).
+
+    Public examples use `url="http://host:port"` and this backend appends `/v1`
+    internally. `base_url="http://host:port/v1"` remains available as an
+    explicit compatibility alias.
+    """
 
     def __init__(
         self,
         model: str,
-        base_url: str = "http://localhost:8080/v1",
+        url: str = "http://localhost:8080",
+        *,
+        base_url: str | None = None,
         api_key: str = "not-needed",
         timeout: float = 30.0,
     ) -> None:
+        if base_url is not None and url != "http://localhost:8080":
+            raise ValueError("Pass either url or base_url, not both.")
+
+        configured_url = base_url or url
         self.model = model
-        self.base_url = base_url.rstrip("/")
+        self.base_url = self._normalize_base_url(configured_url)
+        self.url = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
         self.api_key = api_key
         self.timeout = timeout
         self._client: Any | None = None
@@ -99,6 +111,13 @@ class VLLMBackend(LLMBackend):
             health_url = f"{self.base_url}/health"
         models_url = f"{self.base_url}/models"
         return [health_url, models_url]
+
+    @staticmethod
+    def _normalize_base_url(url: str) -> str:
+        normalized = url.rstrip("/")
+        if normalized.endswith("/v1"):
+            return normalized
+        return f"{normalized}/v1"
 
     def _fetch_status(self, url: str) -> int:
         req = request.Request(

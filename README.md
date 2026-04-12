@@ -16,6 +16,15 @@ mathematical reasoning gym.
    `python examples/quickstart.py`
 5. See your episode log in `./episodes/`
 
+The public `VLLMBackend` example uses:
+
+```python
+backend = VLLMBackend(model="qwen3-8b", url="http://localhost:8080")
+```
+
+The client normalizes that to the OpenAI-compatible `/v1` base path internally.
+`base_url="http://localhost:8080/v1"` is still supported as an explicit compatibility alias.
+
 The beginner-facing runtime API is synchronous:
 
 ```python

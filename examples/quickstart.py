@@ -10,7 +10,7 @@ def main() -> None:
     # 1. Connect to your model server (vLLM, Ollama, TGI, etc.)
     backend = VLLMBackend(
         model="qwen3-8b",
-        base_url="http://localhost:8080/v1",  # <- your model server
+        url="http://localhost:8080",  # <- your model server; /v1 is appended automatically
     )
 
     # 2. Configure the hosted curriculum session
