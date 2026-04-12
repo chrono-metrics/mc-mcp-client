@@ -10,7 +10,7 @@ from websockets.server import ServerConnection
 
 from mc_mcp_client.backends.base import LLMBackend
 from mc_mcp_client.config import DEFAULT_SERVICE_URL, EpisodeConfig, SessionConfig
-from mc_mcp_client.orchestrator import Orchestrator
+from mc_mcp_client.orchestrator import Orchestrator, _ToolBatch
 from mc_mcp_client.protocol import EpisodeComplete, EpisodeEnd, Synthesis, ToolCall
 
 
@@ -66,6 +66,10 @@ async def _recv_episode_start(connection: ServerConnection) -> dict:
     msg = json.loads(raw)
     assert msg["type"] == "episode_start", f"Expected episode_start, got {msg['type']!r}"
     return msg
+
+
+def _batch_response(*payloads: dict) -> str:
+    return "\n".join(json.dumps(payload) for payload in payloads)
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -289,6 +293,287 @@ async def test_run_episode_retries_once_after_parse_failure(mock_websocket_serve
 
 
 @pytest.mark.asyncio
+async def test_run_episode_executes_batchable_tool_batch_and_concatenates_observations(
+    mock_websocket_server,
+    tmp_path: Path,
+) -> None:
+    session_id = "episode-batchable-tools"
+    mock_websocket_server.add_session(
+        session_id,
+        ready_overrides={"budget_per_episode": 5, "synthesis_cadence": 8},
+    )
+    received_messages: list[dict] = []
+
+    async def batch_handler(connection: ServerConnection, _: str) -> None:
+        await _recv_episode_start(connection)
+        await connection.send(
+            _episode_ready(session_id, episode_number=1, seeds=[17, 23, 42], budget=5)
+        )
+
+        for step, value in enumerate([17, 23, 42], start=1):
+            tool_call = json.loads(await connection.recv())
+            received_messages.append(tool_call)
+            assert tool_call["type"] == "tool_call"
+            assert tool_call["tool"] == "mc.encode"
+            assert tool_call["args"] == {"value": value}
+            await connection.send(
+                json.dumps(
+                    {
+                        "type": "tool_result",
+                        "id": tool_call["id"],
+                        "ok": True,
+                        "data": {"handle": f"h_{value}"},
+                        "step": step,
+                        "budget_remaining": 5 - step,
+                        "reward_so_far": float(step),
+                        "reward_multiplier": 1.0,
+                    }
+                )
+            )
+
+        episode_end = json.loads(await connection.recv())
+        received_messages.append(episode_end)
+        await connection.send(
+            json.dumps(
+                {
+                    "type": "episode_complete",
+                    "total_reward": 3.0,
+                    "reward_breakdown": {"reward_base": 3.0},
+                    "steps": 3,
+                    "syntheses": 0,
+                    "conjectures_produced": 0,
+                    "conjectures_board_eligible": 0,
+                }
+            )
+        )
+        await connection.wait_closed()
+
+    mock_websocket_server.queue_handler(session_id, batch_handler)
+
+    backend = ScriptedBackend(
+        [
+            _batch_response(
+                {"tool": "mc.encode", "args": {"value": 17}},
+                {"tool": "mc.encode", "args": {"value": 23}},
+                {"tool": "mc.encode", "args": {"value": 42}},
+            ),
+            "No more conjectures to explore.",
+        ]
+    )
+    orchestrator = Orchestrator(
+        backend=backend,
+        service_url=mock_websocket_server.service_url,
+        api_key=mock_websocket_server.api_key,
+        config=EpisodeConfig(local_log_dir=str(tmp_path)),
+    )
+
+    result = await orchestrator.run_episode_async(session_id, seeds=[17, 23, 42])
+
+    assert result.steps == 3
+    assert received_messages[-1] == {"type": "episode_end", "reason": "no_more_conjectures"}
+    assert [message["tool"] for message in received_messages[:-1]] == ["mc.encode", "mc.encode", "mc.encode"]
+
+    observation_messages = [
+        message["content"]
+        for message in backend.calls[1]
+        if message["role"] == "user" and "tool=mc.encode" in message["content"]
+    ]
+    assert len(observation_messages) == 1
+    assert observation_messages[0].count("tool=mc.encode") == 3
+    assert "\n\n" in observation_messages[0]
+
+    log_path = tmp_path / f"{session_id}.jsonl"
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    tool_steps = [event for event in events if event["event_type"] == "tool_step"]
+    assert len(tool_steps) == 3
+
+
+@pytest.mark.asyncio
+async def test_run_episode_rejects_mixed_tool_batch_and_requests_retry(
+    mock_websocket_server,
+    tmp_path: Path,
+) -> None:
+    session_id = "episode-mixed-batch"
+    mock_websocket_server.add_session(
+        session_id,
+        ready_overrides={"budget_per_episode": 5, "synthesis_cadence": 8},
+    )
+    received_messages: list[dict] = []
+
+    async def mixed_batch_handler(connection: ServerConnection, _: str) -> None:
+        await _recv_episode_start(connection)
+        await connection.send(
+            _episode_ready(session_id, episode_number=1, seeds=[17, 23], budget=5)
+        )
+
+        episode_end = json.loads(await connection.recv())
+        received_messages.append(episode_end)
+        await connection.send(
+            json.dumps(
+                {
+                    "type": "episode_complete",
+                    "total_reward": 0.0,
+                    "reward_breakdown": {"reward_base": 0.0},
+                    "steps": 0,
+                    "syntheses": 0,
+                    "conjectures_produced": 0,
+                    "conjectures_board_eligible": 0,
+                }
+            )
+        )
+        await connection.wait_closed()
+
+    mock_websocket_server.queue_handler(session_id, mixed_batch_handler)
+
+    backend = ScriptedBackend(
+        [
+            _batch_response(
+                {"tool": "mc.encode", "args": {"value": 17}},
+                {"tool": "mc.compare", "args": {"lhs": "h_left", "rhs": "h_right"}},
+            ),
+            "No more conjectures to explore.",
+        ]
+    )
+    orchestrator = Orchestrator(
+        backend=backend,
+        service_url=mock_websocket_server.service_url,
+        api_key=mock_websocket_server.api_key,
+        config=EpisodeConfig(local_log_dir=str(tmp_path)),
+    )
+
+    result = await orchestrator.run_episode_async(session_id, seeds=[17, 23])
+
+    assert result.steps == 0
+    assert received_messages == [{"type": "episode_end", "reason": "no_more_conjectures"}]
+    assert any(
+        message["role"] == "user" and "exactly one tool call as a single JSON object" in message["content"]
+        for message in backend.calls[1]
+    )
+
+    log_path = tmp_path / f"{session_id}.jsonl"
+    events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [event["event_type"] for event in events] == ["episode_start", "episode_end"]
+
+
+@pytest.mark.asyncio
+async def test_run_episode_stops_batch_drain_when_synthesis_required_mid_batch(
+    mock_websocket_server,
+    tmp_path: Path,
+) -> None:
+    session_id = "episode-batch-synthesis"
+    mock_websocket_server.add_session(
+        session_id,
+        ready_overrides={"budget_per_episode": 5, "synthesis_cadence": 2},
+    )
+    received_messages: list[dict] = []
+
+    async def batch_synthesis_handler(connection: ServerConnection, _: str) -> None:
+        await _recv_episode_start(connection)
+        await connection.send(
+            _episode_ready(session_id, episode_number=1, seeds=[17, 23, 42], budget=5)
+        )
+
+        for step, value in enumerate([17, 23], start=1):
+            tool_call = json.loads(await connection.recv())
+            received_messages.append(tool_call)
+            await connection.send(
+                json.dumps(
+                    {
+                        "type": "tool_result",
+                        "id": tool_call["id"],
+                        "ok": True,
+                        "data": {"handle": f"h_{value}"},
+                        "step": step,
+                        "budget_remaining": 5 - step,
+                        "reward_so_far": step / 2,
+                        "reward_multiplier": 1.0,
+                    }
+                )
+            )
+
+        await connection.send(
+            json.dumps(
+                {
+                    "type": "synthesis_required",
+                    "step": 2,
+                    "budget_remaining": 3,
+                    "reward_so_far": 1.0,
+                    "reward_multiplier": 1.0,
+                }
+            )
+        )
+
+        synthesis = json.loads(await connection.recv())
+        received_messages.append(synthesis)
+        await connection.send(
+            json.dumps(
+                {
+                    "type": "synthesis_scored",
+                    "id": synthesis["id"],
+                    "reward_after": 2.0,
+                    "reward_delta": 1.0,
+                    "conjectures_extracted": 1,
+                    "conjecture_ids": ["conj_mid_batch"],
+                    "prior_relevant": [],
+                    "reward_multiplier": 1.0,
+                }
+            )
+        )
+
+        episode_end = json.loads(await connection.recv())
+        received_messages.append(episode_end)
+        await connection.send(
+            json.dumps(
+                {
+                    "type": "episode_complete",
+                    "total_reward": 2.0,
+                    "reward_breakdown": {"reward_base": 2.0},
+                    "steps": 2,
+                    "syntheses": 1,
+                    "conjectures_produced": 1,
+                    "conjectures_board_eligible": 0,
+                }
+            )
+        )
+        await connection.wait_closed()
+
+    mock_websocket_server.queue_handler(session_id, batch_synthesis_handler)
+
+    backend = ScriptedBackend(
+        [
+            _batch_response(
+                {"tool": "mc.encode", "args": {"value": 17}},
+                {"tool": "mc.encode", "args": {"value": 23}},
+                {"tool": "mc.encode", "args": {"value": 42}},
+            ),
+            "Conjecture: the handles preserve input order across the seed list.",
+            "No more conjectures to explore.",
+        ]
+    )
+    orchestrator = Orchestrator(
+        backend=backend,
+        service_url=mock_websocket_server.service_url,
+        api_key=mock_websocket_server.api_key,
+        config=EpisodeConfig(local_log_dir=str(tmp_path), synthesis_cadence=2, max_steps=5),
+    )
+
+    result = await orchestrator.run_episode_async(session_id, seeds=[17, 23, 42])
+
+    assert result.steps == 2
+    assert [message["tool"] for message in received_messages[:2]] == ["mc.encode", "mc.encode"]
+    assert received_messages[2]["type"] == "synthesis"
+    assert received_messages[3] == {"type": "episode_end", "reason": "no_more_conjectures"}
+
+    observation_messages = [
+        message["content"]
+        for message in backend.calls[1]
+        if message["role"] == "user" and "tool=mc.encode" in message["content"]
+    ]
+    assert len(observation_messages) == 1
+    assert observation_messages[0].count("tool=mc.encode") == 2
+
+
+@pytest.mark.asyncio
 async def test_run_session_runs_multiple_episodes(mock_websocket_server, tmp_path: Path) -> None:
     session_id = "multi-episode-session"
     mock_websocket_server.add_session(
@@ -447,6 +732,54 @@ def test_parse_model_response_handles_stop_fences_and_text_tool_calls(tmp_path: 
     assert parsed_text.tool == "mc.compare"
     assert parsed_text.args == {"lhs": "h1", "rhs": "h2"}
     assert isinstance(parsed_synthesis, Synthesis)
+
+
+def test_parse_model_response_accepts_batchable_tool_batches(tmp_path: Path) -> None:
+    backend = ScriptedBackend([])
+    orchestrator = Orchestrator(
+        backend=backend,
+        service_url="ws://localhost:9090",
+        api_key="test-key",
+        config=EpisodeConfig(local_log_dir=str(tmp_path)),
+    )
+
+    parsed_batch = orchestrator._parse_model_response(
+        _batch_response(
+            {"tool": "mc.encode", "args": {"value": 17}},
+            {"tool": "mc.capabilities", "args": {}},
+            {"tool": "mc.session_open", "args": {"label": "session-a"}},
+        )
+    )
+
+    assert isinstance(parsed_batch, _ToolBatch)
+    assert [tool_call.tool for tool_call in parsed_batch.tool_calls] == [
+        "mc.encode",
+        "mc.capabilities",
+        "mc.session_open",
+    ]
+    assert parsed_batch.tool_calls[0].args == {"value": 17}
+    assert parsed_batch.tool_calls[1].args == {}
+    assert parsed_batch.tool_calls[2].args == {"label": "session-a"}
+
+
+def test_parse_model_response_rejects_mixed_tool_batches(tmp_path: Path) -> None:
+    backend = ScriptedBackend([])
+    orchestrator = Orchestrator(
+        backend=backend,
+        service_url="ws://localhost:9090",
+        api_key="test-key",
+        config=EpisodeConfig(local_log_dir=str(tmp_path)),
+    )
+
+    parsed_batch = orchestrator._parse_model_response(
+        _batch_response(
+            {"tool": "mc.encode", "args": {"value": 17}},
+            {"tool": "mc.compare", "args": {"lhs": "h_left", "rhs": "h_right"}},
+        )
+    )
+
+    assert isinstance(parsed_batch, Synthesis)
+    assert "mc.compare" in parsed_batch.text
 
 
 def test_system_prompt_excludes_config_field(tmp_path: Path) -> None:
