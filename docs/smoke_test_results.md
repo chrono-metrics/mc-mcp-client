@@ -1,13 +1,15 @@
 # HOTFIX-01e Smoke Test Results
 
 **Date:** 2026-04-12  
-**Service:** Local (`ws://localhost:9092`)  
-**Service version:** `0.1.0`  
-**Client:** `mc-mcp-client` commit `08613ab` (HOTFIX-01d)  
+**Service:** Cloud Run (`https://mc-mcp-ws-service-687522919138.us-central1.run.app`)  
+**Service revision:** `mc-mcp-ws-service-00003-852` (HOTFIX-01c deployed 2026-04-12)  
+**Access:** `gcloud run services proxy mc-mcp-ws-service --project=ladder-gym --region=us-central1 --port=9091`  
+**Client:** `mc-mcp-client` commit `d2d8899` (HOTFIX-01e)  
 **Family config:** `{"mode": "zeckendorf", "depth": 20}`  
 **Model:** Scripted backend (see note)  
 
-> **Model note:** Qwen3-8B is not available in the test environment.
+> **Model note:** Qwen3-8B is not available in the test environment (L4 instance
+> could not start due to zone stockout in us-central1-a).
 > Tests 1, 2, and 4 used a `ScriptedBackend` that sends one `mc.encode` call
 > then stops — sufficient to verify the full protocol path end-to-end.
 > Tests 3 and 5 require a real model and manual execution (see §Status below).
@@ -141,7 +143,7 @@ grep '"config"' episodes/*.jsonl
 
 ```
 pytest tests/integration/test_e2e_smoke.py -v
-MC_MCP_SERVICE_URL=ws://localhost:9092 MC_MCP_API_KEY=mcmcp_dev
+MC_MCP_SERVICE_URL=ws://localhost:9091 MC_MCP_API_KEY=mcmcp_dev  (via gcloud proxy)
 
 PASSED  test_service_health
 PASSED  test_session_create_returns_family_info
