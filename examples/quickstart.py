@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 from mc_mcp_client import DEFAULT_SERVICE_URL, Orchestrator, SessionConfig, VLLMBackend
 
@@ -11,7 +12,8 @@ from mc_mcp_client import DEFAULT_SERVICE_URL, Orchestrator, SessionConfig, VLLM
 def main() -> None:
     api_key = os.getenv("MC_MCP_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("Set MC_MCP_API_KEY before running the quickstart.")
+        print("Set MC_MCP_API_KEY environment variable", file=sys.stderr)
+        raise SystemExit(1)
 
     model_url = os.getenv("MC_MCP_MODEL_URL", "http://localhost:8080")
     service_url = os.getenv("MC_MCP_SERVICE_URL", DEFAULT_SERVICE_URL)
