@@ -1,0 +1,15 @@
+model: "Qwen/Qwen3-8B"
+model_url: "http://localhost:8080/v1"
+model_path: "./models/qwen3-8b"
+adapter_path: "./adapters/current"
+service_url: "ws://localhost:9090"
+api_key: "${MC_MCP_API_KEY}"
+stage: 2
+G: 4
+num_generations: 100
+checkpoint_every: 10
+lora_config:
+  rank: 16
+  alpha: 32
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  learning_rate: 1.0e-5
