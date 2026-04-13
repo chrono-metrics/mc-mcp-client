@@ -1,0 +1,27 @@
+model: "qwen3:8b"
+model_url: "${MC_MCP_MODEL_URL}"
+model_path: "./models/qwen3-8b"
+adapter_path: "./adapters/current"
+service_url: "${MC_MCP_SERVICE_URL}"
+api_key: "${MC_MCP_API_KEY}"
+stage: 2
+G: 4
+num_generations: 1
+checkpoint_every: 1
+local_log_root: "./episodes/live_qwen3_grpo"
+checkpoint_dir: "./checkpoints/live_qwen3_grpo"
+random_seed: 42
+seed_count: 3
+seed_min: 1
+seed_max: 100
+enabled_tiers: ["E0", "E1", "E2"]
+max_steps: 40
+synthesis_cadence: 8
+temperature: 0.7
+max_tokens: 16384
+model_timeout: 300.0
+lora_config:
+  rank: 16
+  alpha: 32
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  learning_rate: 1.0e-5

@@ -232,7 +232,7 @@ class Orchestrator:
         try:
             while True:
                 if pending_synthesis_prompt is not None:
-                    synthesis_text = await self.backend.generate(
+                    synthesis_text = await self._generate_model_response(
                         messages,
                         max_tokens=self.config.max_tokens,
                         temperature=self.config.temperature,
@@ -281,7 +281,7 @@ class Orchestrator:
                     pending_synthesis_prompt = followup_prompt
                     continue
 
-                response_text = await self.backend.generate(
+                response_text = await self._generate_model_response(
                     messages,
                     max_tokens=self.config.max_tokens,
                     temperature=self.config.temperature,
@@ -300,7 +300,7 @@ class Orchestrator:
                     messages.append({"role": "assistant", "content": response_text.strip() or "[empty assistant response]"})
                     messages.append({"role": "user", "content": self._build_retry_prompt()})
 
-                    retry_text = await self.backend.generate(
+                    retry_text = await self._generate_model_response(
                         messages,
                         max_tokens=self.config.max_tokens,
                         temperature=self.config.temperature,
@@ -732,6 +732,45 @@ class Orchestrator:
         if self._pending_messages:
             return self._pending_messages.popleft()
         return parse_server_message(await self.connection.recv(timeout=timeout))
+
+    async def _generate_model_response(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        poll_interval: float = 5.0,
+    ) -> str:
+        """Generate one model turn while continuing to service websocket pings.
+
+        The hosted gym uses application-level heartbeat messages over the same
+        websocket that carries tool results. If the client blocks inside model
+        generation for too long without reading the socket, those ping messages
+        never get answered and the server truncates the active episode. Polling
+        the connection during generation keeps the session alive while still
+        preserving any unexpected non-ping messages for the main control flow.
+        """
+
+        generation_task = asyncio.create_task(
+            self.backend.generate(
+                messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        )
+        try:
+            while True:
+                try:
+                    return await asyncio.wait_for(asyncio.shield(generation_task), timeout=poll_interval)
+                except TimeoutError:
+                    try:
+                        message = await self._next_server_message(timeout=0.1)
+                    except TimeoutError:
+                        continue
+                    self._pending_messages.append(message)
+        finally:
+            if not generation_task.done():
+                generation_task.cancel()
 
     async def _finalize_episode(
         self,

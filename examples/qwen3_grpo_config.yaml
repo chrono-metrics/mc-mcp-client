@@ -8,6 +8,7 @@ stage: 2
 G: 4
 num_generations: 100
 checkpoint_every: 10
+max_tokens: 16384
 lora_config:
   rank: 16
   alpha: 32

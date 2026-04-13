@@ -85,7 +85,8 @@ class TrainingConfig:
     max_steps: int = 40
     synthesis_cadence: int = 8
     temperature: float = 0.7
-    max_tokens: int = 512
+    max_tokens: int = 16384
+    model_timeout: float = 300.0
     lora_config: LoRAConfig = field(default_factory=LoRAConfig)
 
 
@@ -150,7 +151,11 @@ async def train(config_path: str, *, collect_only: bool = False) -> None:
     cfg = load_training_config(config_path)
     rng = random.Random(cfg.random_seed)
 
-    backend = VLLMBackend(model=cfg.model, url=cfg.model_url)
+    backend = VLLMBackend(
+        model=cfg.model,
+        url=cfg.model_url,
+        timeout=cfg.model_timeout,
+    )
     service = ServiceConfig(service_url=cfg.service_url, api_key=cfg.api_key)
     session = SessionConfig(
         enabled_tiers=list(cfg.enabled_tiers),
