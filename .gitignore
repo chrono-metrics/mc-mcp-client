@@ -45,3 +45,4 @@ MANIFEST
 *.jsonl
 checkpoints/
 .env
+.DS_Store
