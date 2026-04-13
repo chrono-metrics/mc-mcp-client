@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,vllm]"
       - name: Lint
         run: ruff check src tests
       - name: Test
