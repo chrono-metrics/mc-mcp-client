@@ -51,7 +51,7 @@ class EpisodeConfig:
     max_steps: int = 40
     synthesis_cadence: int = 8
     temperature: float = 0.7
-    max_tokens: int = 512
+    max_tokens: int = 16384
     local_log_dir: str = "./episodes"
     stop_phrases: list[str] = field(
         default_factory=lambda: [

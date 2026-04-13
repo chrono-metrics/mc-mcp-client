@@ -50,6 +50,12 @@ _BATCHABLE_TOOL_NAMES = (
     "mc.hist_calibrate",
 )
 _BATCHABLE_TOOLS = frozenset(tool_name.partition(".")[2] for tool_name in _BATCHABLE_TOOL_NAMES)
+_MAX_CONSECUTIVE_ASSISTANT_NOTES = 2
+_POST_ASSISTANT_NOTE_PROMPT = (
+    "Continue the discovery episode.\n"
+    "If you want to stop, say exactly that you have no more conjectures to explore.\n"
+    "Otherwise, make your next tool call now."
+)
 
 
 @dataclass
@@ -191,6 +197,7 @@ class Orchestrator:
         self._tool_counter = 0
         self._synthesis_counter = 0
         self._pending_messages.clear()
+        self._consecutive_assistant_notes = 0
 
         log_path = self._resolve_log_path()
 
@@ -296,33 +303,33 @@ class Orchestrator:
                     )
 
                 if not isinstance(parsed, (ToolCall, _ToolBatch)):
-                    logger.warning("Model response did not parse as a tool call; requesting one retry.")
-                    messages.append({"role": "assistant", "content": response_text.strip() or "[empty assistant response]"})
-                    messages.append({"role": "user", "content": self._build_retry_prompt()})
-
-                    retry_text = await self._generate_model_response(
-                        messages,
-                        max_tokens=self.config.max_tokens,
-                        temperature=self.config.temperature,
+                    content = response_text.strip() or "[empty assistant response]"
+                    messages.append({"role": "assistant", "content": content})
+                    self._append_log_event(
+                        log_path,
+                        {
+                            "event_type": "assistant_note",
+                            "step": current_step,
+                            "content": content,
+                        },
                     )
-                    retry_parsed = self._parse_model_response(retry_text)
 
-                    if isinstance(retry_parsed, EpisodeEnd):
-                        messages.append({"role": "assistant", "content": retry_text.strip() or retry_parsed.reason})
-                        return await self._finalize_episode(
-                            reason=retry_parsed.reason,
-                            log_path=log_path,
+                    self._consecutive_assistant_notes += 1
+                    if self._consecutive_assistant_notes >= _MAX_CONSECUTIVE_ASSISTANT_NOTES:
+                        logger.warning(
+                            "Model produced %d consecutive non-tool-call responses; ending episode.",
+                            self._consecutive_assistant_notes,
                         )
-                    if not isinstance(retry_parsed, (ToolCall, _ToolBatch)):
-                        messages.append({"role": "assistant", "content": retry_text.strip() or "[empty assistant response]"})
-                        logger.warning("Model failed to produce a valid tool call after retry; ending episode.")
                         return await self._finalize_episode(
-                            reason="parse_error",
+                            reason="assistant_text",
                             log_path=log_path,
                         )
 
-                    parsed = retry_parsed
-                    response_text = retry_text
+                    logger.info("Model produced assistant note; re-prompting for tool call.")
+                    messages.append({"role": "user", "content": _POST_ASSISTANT_NOTE_PROMPT})
+                    continue
+
+                self._consecutive_assistant_notes = 0
                 current_step, turn_complete, pending_synthesis_prompt = await self._execute_tool_turn(
                     parsed=parsed,
                     response_text=response_text,
@@ -399,13 +406,16 @@ class Orchestrator:
             raise RuntimeError("Session creation response did not include a session_id.")
         return str(parsed["session_id"])
 
-    @staticmethod
-    def _run_sync(coro_factory: Callable[[], Awaitable[Any]]) -> Any:
+    def _run_sync(self, coro_factory: Callable[[], Awaitable[Any]]) -> Any:
         """Run a coroutine from sync code and reject nested event-loop use."""
 
         try:
             asyncio.get_running_loop()
         except RuntimeError:
+            # Reset any cached async clients so they are not reused across
+            # event loops (asyncio.run creates a fresh loop each call).
+            if hasattr(self.backend, "_client"):
+                self.backend._client = None
             return asyncio.run(coro_factory())
 
         raise RuntimeError(
@@ -540,12 +550,14 @@ class Orchestrator:
             f"prior_relevant={prior_relevant} reward_multiplier={scored.reward_multiplier}"
         )
 
+    _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
     def _parse_model_response(
         self,
         response: str,
     ) -> ToolCall | _ToolBatch | Synthesis | EpisodeEnd:
         """Parse model text into a tool call, synthesis, or episode end."""
-        stripped = response.strip()
+        stripped = self._THINK_RE.sub("", response).strip()
         if self._signals_stop(stripped):
             return EpisodeEnd(reason="no_more_conjectures")
 
@@ -709,7 +721,7 @@ class Orchestrator:
         while True:
             try:
                 message = await self._next_server_message(timeout=_FOLLOWUP_TIMEOUT)
-            except TimeoutError:
+            except (TimeoutError, asyncio.TimeoutError):
                 return None, synthesis_prompt
 
             if isinstance(message, EpisodeComplete):
@@ -758,14 +770,15 @@ class Orchestrator:
                 temperature=temperature,
             )
         )
+        _timeout_errs = (TimeoutError, asyncio.TimeoutError)
         try:
             while True:
                 try:
                     return await asyncio.wait_for(asyncio.shield(generation_task), timeout=poll_interval)
-                except TimeoutError:
+                except _timeout_errs:
                     try:
                         message = await self._next_server_message(timeout=0.1)
-                    except TimeoutError:
+                    except _timeout_errs:
                         continue
                     self._pending_messages.append(message)
         finally:
