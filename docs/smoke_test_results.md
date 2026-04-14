@@ -90,9 +90,9 @@ valid_fraction:            1.0
 
 **Status: PENDING — requires real model + monolith**
 
-**To run:**
+**To run (local/dev):**
 ```bash
-export MC_MCP_SERVICE_URL=ws://localhost:9090
+export MC_MCP_SERVICE_URL=ws://localhost:9090   # local/dev only
 export MC_MCP_API_KEY=mcmcp_dev
 export MC_MCP_MODEL_URL=http://localhost:8080/v1
 export MC_MCP_MONOLITH_PATH=/path/to/MC-MCP

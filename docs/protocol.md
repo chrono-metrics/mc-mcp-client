@@ -54,7 +54,7 @@ Response `200 OK`:
 ```json
 {
   "session_id": "abc123def456",
-  "ws_url": "ws://localhost:9090/v1/sessions/abc123def456/ws",
+  "ws_url": "ws://gym.chrono-metrics.com/v1/sessions/abc123def456/ws",
   "enabled_tiers": ["E0", "E1", "E2"],
   "budget": 40,
   "synthesis_cadence": 8

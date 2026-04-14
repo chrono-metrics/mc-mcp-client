@@ -18,6 +18,8 @@ def main() -> None:
     model_url = os.getenv("MC_MCP_MODEL_URL", "http://localhost:8080")
     service_url = os.getenv("MC_MCP_SERVICE_URL", DEFAULT_SERVICE_URL)
 
+    print(f"Using MC-MCP service: {service_url}")
+
     backend = VLLMBackend(
         model="qwen3-8b",
         url=model_url,

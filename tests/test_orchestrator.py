@@ -822,7 +822,7 @@ def test_orchestrator_defaults_to_hosted_service_without_manual_service_config(t
     )
 
     assert orchestrator._service_config.service_url == DEFAULT_SERVICE_URL
-    assert orchestrator._service_config.session_create_url == "https://api.mc-mcp.com/v1/sessions"
+    assert orchestrator._service_config.session_create_url == "http://gym.chrono-metrics.com/v1/sessions"
     assert orchestrator.connection.service_url == DEFAULT_SERVICE_URL
     assert orchestrator.connection.api_key == "hosted-key"
     assert orchestrator.session_config.enabled_tiers == ["E0", "E1", "E2"]

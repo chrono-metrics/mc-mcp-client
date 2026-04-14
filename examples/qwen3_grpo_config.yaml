@@ -2,6 +2,7 @@ model: "Qwen/Qwen3-8B"
 model_url: "http://localhost:8080/v1"
 model_path: "./models/qwen3-8b"
 adapter_path: "./adapters/current"
+# Local/dev only — for hosted, omit or use ws://gym.chrono-metrics.com
 service_url: "ws://localhost:9090"
 api_key: "${MC_MCP_API_KEY}"
 stage: 2

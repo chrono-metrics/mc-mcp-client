@@ -151,6 +151,8 @@ async def train(config_path: str, *, collect_only: bool = False) -> None:
     cfg = load_training_config(config_path)
     rng = random.Random(cfg.random_seed)
 
+    print(f"Using MC-MCP service: {cfg.service_url}")
+
     backend = VLLMBackend(
         model=cfg.model,
         url=cfg.model_url,

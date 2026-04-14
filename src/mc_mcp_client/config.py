@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-DEFAULT_SERVICE_URL = "wss://api.mc-mcp.com"
+DEFAULT_SERVICE_URL = "ws://gym.chrono-metrics.com"
 DEFAULT_ENABLED_TIERS = ["E0", "E1", "E2"]
 DEFAULT_SESSION_BUDGET = 40
 DEFAULT_SESSION_SYNTHESIS_CADENCE = 8

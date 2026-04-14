@@ -1,5 +1,5 @@
 service:
-  service_url: "wss://api.mc-mcp.com"
+  service_url: "ws://gym.chrono-metrics.com"
   api_key: "${MC_MCP_API_KEY}"
 
 session:

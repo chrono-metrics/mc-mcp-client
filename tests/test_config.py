@@ -20,16 +20,16 @@ from mc_mcp_client.config import (
 
 
 def test_service_config_derives_session_create_url() -> None:
-    config = ServiceConfig(service_url="wss://api.mc-mcp.com")
+    config = ServiceConfig(service_url="ws://gym.chrono-metrics.com")
 
-    assert config.session_create_url == "https://api.mc-mcp.com/v1/sessions"
+    assert config.session_create_url == "http://gym.chrono-metrics.com/v1/sessions"
 
 
 def test_service_config_defaults_to_hosted_service() -> None:
     config = ServiceConfig()
 
     assert config.service_url == DEFAULT_SERVICE_URL
-    assert config.session_create_url == "https://api.mc-mcp.com/v1/sessions"
+    assert config.session_create_url == "http://gym.chrono-metrics.com/v1/sessions"
 
 
 def test_session_config_builds_public_create_payload_defaults() -> None:
@@ -81,7 +81,7 @@ def test_load_config_reads_yaml_and_expands_env_vars(tmp_path: Path, monkeypatch
     config_path.write_text(
         """
 service:
-  service_url: "wss://api.mc-mcp.com"
+  service_url: "ws://gym.chrono-metrics.com"
   api_key: "${MC_MCP_API_KEY}"
 model:
   backend: "vllm"
@@ -115,9 +115,9 @@ episode:
     assert episode.max_tokens == 1024
     assert episode.local_log_dir == "./tmp-episodes"
     assert episode.stop_phrases == EpisodeConfig().stop_phrases
-    assert service.service_url == "wss://api.mc-mcp.com"
+    assert service.service_url == "ws://gym.chrono-metrics.com"
     assert service.api_key == "yaml-env-key"
-    assert service.session_create_url == "https://api.mc-mcp.com/v1/sessions"
+    assert service.session_create_url == "http://gym.chrono-metrics.com/v1/sessions"
     assert model.backend == "vllm"
     assert model.model == "qwen3-8b"
     assert model.base_url == "http://localhost:8080/v1"
